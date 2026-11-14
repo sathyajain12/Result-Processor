@@ -1,0 +1,21 @@
+name = "sssihl-result-processor"
+compatibility_date = "2026-09-01"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "result-processor"
+database_id = "dba7a181-783d-4aaa-a387-034e2a7d6dd1"
+preview_database_id = "00000000-0000-4000-8000-000000000000"   # local development keeps its own data
+migrations_dir = "migrations"
+
+[vars]
+ADMIN_EMAILS = "results@sssihl.edu.in"
+ALLOWED_DOMAIN = "sssihl.edu.in"
+# Sign in with Google: the OAuth client ID (Google Cloud console → APIs & Services → Credentials).
+# GOOGLE_CLIENT_SECRET and SESSION_SECRET are Pages secrets (wrangler pages secret put ...).
+GOOGLE_CLIENT_ID = "279940091000-57qp3j9at0lum5pjc34rp44vdg8huie5.apps.googleusercontent.com"
+# Optional alternative: Cloudflare Access. From Zero Trust → Access → Applications → this app: the team domain and the Application Audience (AUD) tag.
+# Leave both empty when using Google sign-in.
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""

@@ -1,0 +1,3 @@
+DEV_USER_EMAIL=you@sssihl.edu.in
+GOOGLE_SA_EMAIL=result-processor@your-project.iam.gserviceaccount.com
+GOOGLE_SA_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"

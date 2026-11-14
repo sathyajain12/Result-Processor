@@ -1,0 +1,6 @@
+node_modules
+fixtures/
+reports/
+app/dist
+app/.wrangler
+app/.dev.vars

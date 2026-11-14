@@ -1,0 +1,868 @@
+// Authored by Subramanian S Iyer Nov 2024
+
+var cieSheetNames = ['Course_Master-Apr 2026-ATP', 'Course_Master-Apr 2026-BRN', 'Course_Master-Apr 2026-NDG', 'Course_Master-Apr 2026-PSN'];
+//var eseSheetName = ['Paper_Master-Oct-Nov 2024-ESE']; // name of ESE master Google Sheet
+
+//var cieSheetNames = setSheetNames().cieSheetNames
+//var eseSheetName = setSheetNames().eseSheetName
+
+
+
+var ss = SpreadsheetApp.getActiveSpreadsheet();
+var markSheetName = 'Marks Statement' ; //'Sheet1'
+
+function onOpen(){
+  var ui = SpreadsheetApp.getUi();
+  // Create a new menu and add an item to it
+  //.addItem('Fetch Both CIE & ESE', 'aggregateCIEAndESE')
+  ui.createMenu('Apps Script Codes') // The name of the menu
+    .addItem('Fill CIE Tracking Sheet', 'createCIETrackingSheet')
+    .addItem('Create Headers in CIE Aggregate Sheet', 'createCIEAggregateSheet')
+    .addItem('Fill CIE Aggregate Sheet', 'aggregateCIE')
+    .addItem('Set daily trigger to fetch data', 'setTrigger')
+    .addItem('Track Total Completion Status', 'trackCIECompletionStatus')
+    .addItem('Set Malpractice Marks', 'updateCIEAggregateFromMalpractice')
+    //.addItem('Fill ESE Aggregate Sheet', 'aggregateESE')
+    .addToUi(); // Add the menu to the user interface
+}
+
+
+function setTrigger(){
+  // Create a time-based trigger to run the function daily at 2 PM
+  ScriptApp.newTrigger('aggregateCIE')
+    .timeBased()
+    .everyDays(1)
+    .atHour(9) 
+    .create();
+
+  /*
+    // Create a time-based trigger to run the function daily at 2 PM
+  ScriptApp.newTrigger('aggregateESE')
+    .timeBased()
+    .everyDays(1)
+    .atHour(10) 
+    .create();
+  */
+
+}
+
+
+
+function aggregateCIE(){
+  //createCIETrackingSheet();
+  //createCIEAggregateSheet();
+  var trackingSheet = ss.getSheetByName('CIE Tracking Sheet');
+  var aggregateSheet = ss.getSheetByName('CIE Aggregate Sheet');
+
+  /*
+  if (!trackingSheet) {
+    var trackingSheet = createCIETrackingSheet();
+  }
+  
+  if (!aggregateSheet) {
+    var aggregateSheet = createCIEAggregateSheet();
+  }
+  */
+  
+  aggregateCIEData(trackingSheet, aggregateSheet);
+  
+}
+
+
+function createCIETrackingSheet() {
+  // Create and setup Tracking Sheet (Sheet 2)
+  var trackingSheet = ss.getSheetByName('CIE Tracking Sheet');
+
+  // Insert 'Tracking Sheet' if it doesn't already exist
+  if (!trackingSheet) {
+    trackingSheet = ss.insertSheet('CIE Tracking Sheet');
+  }
+  
+  // Clear existing content before writing header (optional, but clean)
+  trackingSheet.clearContents();
+
+  // Updated header (added "Campus" after "Semester")
+  trackingSheet.getRange(1, 1, 1, 13).setValues([[
+    "Programme Short Name",
+    "Course Code",
+    "Course Title",
+    "Course Type",
+    "Semester",
+    "Campus",             // ⬅️ NEW COLUMN
+    "teacher_name",
+    "teacher_email",
+    "CIE Max",
+    "Due Date",
+    "Marks File Url",
+    "Completed",
+    "Fetched",
+    "Num Students Expected",
+    "Acknowledgement"
+  ]]);
+
+  var cieSheetNames = setSheetNames().cieSheetNames;
+
+  // Loop through each Google Sheet name in cieSheetNames array
+  for (var i = 0; i < cieSheetNames.length; i++) {
+    var file = DriveApp.getFilesByName(cieSheetNames[i]).next();
+
+    // Extract last 3 letters → Campus acronym (ATP, BRN, NDG, PSN)
+    var campus = cieSheetNames[i].slice(-3);
+
+    var sheet = SpreadsheetApp.open(file).getSheetByName('Sheet1');
+
+    var lastRow = getLastRowInColumn(sheet, 'A'); 
+    var data = sheet.getRange(2, 1, lastRow - 1, 10).getValues(); // Original 10 columns A–J
+
+    // Insert Campus column after Semester (index 4)
+    for (var r = 0; r < data.length; r++) {
+      data[r].splice(5, 0, campus); 
+    }
+
+    // Append data to the Tracking Sheet
+    trackingSheet.getRange(
+      trackingSheet.getLastRow() + 1,
+      1,
+      data.length,
+      data[0].length
+    ).setValues(data);
+  }
+
+  return trackingSheet;
+}
+
+
+
+function createCIETrackingSheet1(){
+  // Create and setup Tracking Sheet (Sheet 2)
+  // var trackingSheet = ss.insertSheet('Tracking Sheet');
+  var trackingSheet = ss.getSheetByName('CIE Tracking Sheet');
+
+  // Insert 'Tracking Sheet' if it doesn't already exist
+  if (!trackingSheet) {
+    trackingSheet = ss.insertSheet('CIE Tracking Sheet');
+  }
+  
+  
+  trackingSheet.getRange(1, 1, 1, 12).setValues([["Programme Short Name", "Course Code", "Course Title", "Course Type", "Semester", "teacher_name", "teacher_email", "CIE Max", "Due Date","Marks File Url", "Completed", "Fetched"]]);
+    
+  var cieSheetNames = setSheetNames().cieSheetNames
+  // Loop through each Google Sheet name in cieSheetNames array
+  for (var i = 0; i < cieSheetNames.length; i++) {
+    var file = DriveApp.getFilesByName(cieSheetNames[i]).next();
+    var sheet = SpreadsheetApp.open(file).getSheetByName('Sheet1');
+    //var sheet = SpreadsheetApp.open(file).getSheetByName(markSheetName);
+
+    // Get the last row with data in the specific Google Sheet
+    var lastRow = getLastRowInColumn(sheet, 'A'); // Assuming data starts from column A
+    //var regdNosStartRow = file.getRange('marksStatementRegdNoStart').getRow();
+    //var regdNosStartRow = sheet.getRange('marksStatementRegdNoStart').getRow();
+    var data = sheet.getRange(2, 1, lastRow - 1, 10).getValues(); // Fetch data from columns A to I
+
+    // Add 2 empty columns for "Completed" and "Fetched"
+    //for (var r = 0; r < data.length; r++) {
+    //  data[r].push(''); // empty "Completed"
+    //  data[r].push(''); // empty "Fetched"
+    //}
+
+    // Append data to the Tracking Sheet (Sheet 2)
+    trackingSheet.getRange(trackingSheet.getLastRow() + 1, 1, data.length, data[0].length).setValues(data);
+
+    
+  }
+
+  return trackingSheet
+}
+
+
+
+function createCIEAggregateSheet(){
+
+  // Define headers for the aggregateSheet
+  var aggregateSheet = ss.getSheetByName('CIE Aggregate Sheet');
+
+  if (!aggregateSheet) {
+    aggregateSheet = ss.insertSheet('CIE Aggregate Sheet');
+  }
+
+  var headers = ['Regd. No.', 'Campus' , 'Course Code', 'CIE Marks', 'CIE Percent', 'CIE Num. Points', 'Programme', 'Semester', 'Teacher', 'Remarks'];
+  aggregateSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  return aggregateSheet
+}
+
+
+
+function createCIEAggregateSheet1(){
+
+  // Define headers for the aggregateSheet
+  var aggregateSheet = ss.getSheetByName('CIE Aggregate Sheet');
+
+  if (!aggregateSheet) {
+    aggregateSheet = ss.insertSheet('CIE Aggregate Sheet');
+  }
+
+  var headers = ['Regd. No.', 'Course Code', 'CIE Marks', 'CIE Percent', 'CIE Num. Points', 'Programme', 'Semester'];
+  aggregateSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  return aggregateSheet
+}
+
+function aggregateCIEData1(trackingSheet, aggregateSheet) {
+
+  var allDone = true;
+
+  var lastRowTracking = getLastRowInColumn(trackingSheet, 'A');
+
+  for (var trackRow = 2; trackRow <= lastRowTracking; trackRow++) {
+
+    var fetchedStatus = trackingSheet.getRange(trackRow, 12).getValue();
+    var email = trackingSheet.getRange(trackRow, 8).getValue();
+
+    if (fetchedStatus === "") {
+
+      var marksFileUrl = trackingSheet.getRange(trackRow, 11).getValue();
+
+      if (marksFileUrl) {
+
+        var marksFile = SpreadsheetApp.openByUrl(marksFileUrl);
+        var marksSheet = marksFile.getSheetByName('Marks Statement');
+
+        // ===== Get certify + allFilled safely =====
+        var certifyRange;
+        try {
+          certifyRange = marksSheet.getRange('certifyCell');
+        } catch (e) {
+          certifyRange = marksSheet.getRange('examinerCertifyCell');
+        }
+
+        var certified = String(certifyRange.getValue()).trim().toLowerCase();
+
+        var allFilled;
+        try {
+          allFilled = String(marksSheet.getRange('allFilledCell').getValue()).trim().toLowerCase();
+        } catch (e) {
+          allFilled = "";
+        }
+
+        var validation;
+        try {
+          validation = String(marksSheet.getRange('validationCell').getValue()).trim().toLowerCase();
+        } catch (e) {
+          validation = "";
+        }
+
+        // ===== MAIN CONDITION =====
+        //if (certified === "yes" && allFilled === "yes" && validation === "yes") {
+        if (certified === "yes" && allFilled === "yes") {
+
+          Logger.log("Eligible for aggregation");
+
+          // ===== STEP 1: Convert editors to viewers =====
+          var fileId = marksFile.getId();
+          var perms = Drive.Permissions.list(fileId).items;
+          var ownerEmail = marksFile.getOwner().getEmail();
+
+          perms.forEach(function(p) {
+            if (p.role === "writer" && p.emailAddress !== ownerEmail) {
+              try {
+                Drive.Permissions.update(
+                  { role: "reader" },
+                  fileId,
+                  p.id,
+                  { sendNotificationEmails: false }
+                );
+              } catch (err) {
+                Logger.log("Failed to convert " + p.emailAddress);
+              }
+            }
+          });
+
+          // ===== STEP 2: Mark completed =====
+          trackingSheet.getRange(trackRow, 12).setValue("Completed");
+
+          // ===== STEP 3: Aggregate =====
+          var numStudents = marksSheet.getRange("numStudentsCell").getValue();
+
+          var regdNosStartRow = marksSheet.getRange('marksStatementRegdNoStart').getRow();
+
+          var progNames = marksSheet.getRange(regdNosStartRow, 1, numStudents, 1).getValues();
+          var semValues = marksSheet.getRange(regdNosStartRow, 2, numStudents, 1).getValues();
+
+          var regdNosCol = marksSheet.getRange('marksStatementRegdNoStart').getColumn();
+          var regdNos = marksSheet.getRange(regdNosStartRow, regdNosCol, numStudents, 1).getValues();
+
+          var paperCode = marksSheet.getRange("paperCode").getValue();
+          var paperCodeArray = Array(numStudents).fill([paperCode]);
+
+          var marksCol;
+          try {
+            marksCol = marksSheet.getRange("cieTotalMarks").getColumn();
+          } catch (e) {
+            marksCol = marksSheet.getRange("totalMarks").getColumn();
+          }
+
+          var percentCol = marksSheet.getRange("ciePercent").getColumn();
+          var npCol = marksSheet.getRange("cieNP").getColumn();
+
+          var cieMarks = marksSheet.getRange(regdNosStartRow, marksCol, numStudents, 1).getValues();
+          var ciePercent = marksSheet.getRange(regdNosStartRow, percentCol, numStudents, 1).getValues();
+          var cieNP = marksSheet.getRange(regdNosStartRow, npCol, numStudents, 1).getValues();
+
+          var campus = trackingSheet.getRange(trackRow, 6).getValue();
+          var campusArray = Array(numStudents).fill([campus]);
+
+          var startRow = aggregateSheet.getLastRow() + 1;
+
+          aggregateSheet.getRange(startRow, 1, numStudents, 1).setValues(regdNos);
+          aggregateSheet.getRange(startRow, 2, numStudents, 1).setValues(campusArray);
+          aggregateSheet.getRange(startRow, 3, numStudents, 1).setValues(paperCodeArray);
+          aggregateSheet.getRange(startRow, 4, numStudents, 1).setValues(cieMarks);
+          aggregateSheet.getRange(startRow, 5, numStudents, 1).setValues(ciePercent);
+          aggregateSheet.getRange(startRow, 6, numStudents, 1).setValues(cieNP);
+          aggregateSheet.getRange(startRow, 7, numStudents, 1).setValues(progNames);
+          aggregateSheet.getRange(startRow, 8, numStudents, 1).setValues(semValues);
+
+          trackingSheet.getRange(trackRow, 13).setValue("Done");
+
+        } else {
+          allDone = false;
+        }
+      }
+    }
+  }
+
+  if (allDone) {
+    deleteAggregateCIETrigger();
+  }
+
+  Logger.log('Data aggregation complete.');
+}
+
+// Function to delete the trigger (if necessary)
+function deleteAggregateCIETrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'aggregateCIE') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+
+
+
+
+// Helper function to get the last row in a column
+function getLastRowInColumn(sheet, columnLetter) {
+  var maxRow = sheet.getMaxRows();
+  var lastDataCell = sheet.getRange(columnLetter + maxRow).getNextDataCell(SpreadsheetApp.Direction.UP);
+  return lastDataCell.getRow();
+}
+
+
+
+function setExamDates() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheetName = sheet.getName();
+  
+  // Extract examName (after the '-')
+  var examName = sheetName.split(' - ')[1];
+
+  if (!examName) {
+    Logger.log("Error: Could not extract examName.");
+    return;
+  }
+
+  // Set global variables
+  var cieExamDate = examName;
+  var eseExamDate = examName;
+
+  //Logger.log("CIE Exam Date: " + cieExamDate);
+  //Logger.log("ESE Exam Date: " + eseExamDate);
+
+  return { cieExamDate, eseExamDate };
+}
+
+
+function setSheetNames() {
+  var examDates = setExamDates(); // Call the first function to get examName
+  var examName = examDates.cieExamDate; // Both variables hold the same value
+
+  var cieSheetNames = [
+    `Course_Master-${examName}-ATP`,
+    `Course_Master-${examName}-BRN`,
+    `Course_Master-${examName}-NDG`,
+    `Course_Master-${examName}-PSN`
+  ];
+
+  var eseSheetName = [`Paper_Master-${examName}-ESE`]; // Array with one element
+
+  //Logger.log("CIE Sheet Names: " + cieSheetNames.join(", "));
+  //Logger.log("ESE Sheet Name: " + eseSheetName[0]);
+
+  return { cieSheetNames, eseSheetName };
+}
+
+
+function testCIESheetNames(){
+  Logger.log(setSheetNames().cieSheetNames)
+  Logger.log(setSheetNames().eseSheetName)
+}
+
+
+
+function trackCIECompletionStatus() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  const cieSheet = ss.getSheetByName('CIE Tracking Sheet');
+  //const eseSheet = ss.getSheetByName('ESE Tracking Sheet');
+
+  if (!cieSheet ) { //|| !eseSheet) {
+    throw new Error('One or more sheets not found. Please check the sheet names.');
+  }
+
+  // Create or get the "Completion Status" sheet
+  let outputSheet = ss.getSheetByName('Completion Status');
+  if (!outputSheet) {
+    outputSheet = ss.insertSheet('Completion Status');
+  }
+
+  // Read data
+  const cieData = cieSheet.getDataRange().getValues();
+  //const eseData = eseSheet.getDataRange().getValues();
+
+  // Header indexes (assuming headers are in Row 1)
+  const programmeCol = 0; // A
+  const fetchedCol = 11;  // K
+
+  // Build set of all Programme Short Names
+  const programmeSet = new Set();
+
+  for (let i = 1; i < cieData.length; i++) {
+    programmeSet.add(cieData[i][programmeCol]);
+  }
+
+  //for (let i = 1; i < eseData.length; i++) {
+  //  programmeSet.add(eseData[i][programmeCol]);
+  //}
+
+  const programmeList = Array.from(programmeSet).sort();
+
+  // Build data
+  const output = [
+    ['Programme Short Name', 'Num CIE Expected', 'Actual CIE',  'Completion Status']
+  ];
+
+  programmeList.forEach(prog => {
+    const cieExpected = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const cieActual = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    //const eseExpected = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    //const eseActual = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    let status = 'Pending';
+    if (cieExpected === cieActual){ // && eseExpected === eseActual) {
+      status = 'Completed';
+    }
+
+    output.push([prog, cieExpected, cieActual, status]); //, eseExpected, eseActual, status]);
+  });
+
+  // Write to Completion Status sheet
+  outputSheet.clear();
+  outputSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+
+function trackCompletionStatus1() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  const cieSheet = ss.getSheetByName('CIE Tracking Sheet');
+  const eseSheet = ss.getSheetByName('ESE Tracking Sheet');
+
+  if (!cieSheet || !eseSheet) {
+    throw new Error('One or more sheets not found. Please check the sheet names.');
+  }
+
+  // Create or get the "Completion Status" sheet
+  let outputSheet = ss.getSheetByName('Completion Status');
+  if (!outputSheet) {
+    outputSheet = ss.insertSheet('Completion Status');
+  }
+
+  // Read data
+  const cieData = cieSheet.getDataRange().getValues();
+  const eseData = eseSheet.getDataRange().getValues();
+
+  // Header indexes (assuming headers are in Row 1)
+  const programmeCol = 0; // A
+  const fetchedCol = 10;  // K
+
+  // Build set of all Programme Short Names
+  const programmeSet = new Set();
+
+  for (let i = 1; i < cieData.length; i++) {
+    programmeSet.add(cieData[i][programmeCol]);
+  }
+  for (let i = 1; i < eseData.length; i++) {
+    programmeSet.add(eseData[i][programmeCol]);
+  }
+
+  const programmeList = Array.from(programmeSet).sort();
+
+  // Build data
+  const output = [
+    ['Programme Short Name', 'Num CIE Expected', 'Actual CIE',
+     'Num ESE Expected', 'Actual ESE', 'Completion Status']
+  ];
+
+  programmeList.forEach(prog => {
+    const cieExpected = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const cieActual = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    const eseExpected = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const eseActual = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    let status = 'Pending';
+    if (cieExpected === cieActual && eseExpected === eseActual) {
+      status = 'Completed';
+    }
+
+    output.push([prog, cieExpected, cieActual, eseExpected, eseActual, status]);
+  });
+
+  // Write to Completion Status sheet
+  outputSheet.clear();
+  outputSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+
+function updateCIEAggregateFromMalpractice() {
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const aggregateSheet = ss.getSheetByName("CIE Aggregate Sheet");
+  const malpracticeSheet = ss.getSheetByName("Malpractice");
+
+  const aggregateData = aggregateSheet.getDataRange().getValues();
+  const malpracticeData = malpracticeSheet.getDataRange().getValues();
+
+  // ---------- Aggregate column indices ----------
+  const aggHeader = aggregateData[0];
+
+  const aggRegdCol = aggHeader.indexOf("Regd. No.");
+  const aggCampusCol = aggHeader.indexOf("Campus");
+  const aggCourseCol = aggHeader.indexOf("Course Code");
+  const aggMarksCol = aggHeader.indexOf("CIE Marks");
+  const aggPercentCol = aggHeader.indexOf("CIE Percent");
+  const aggPointsCol = aggHeader.indexOf("CIE Num. Points");
+  const aggRemarksCol = aggHeader.indexOf("Remarks");
+
+  // ---------- Malpractice column indices ----------
+  const malHeader = malpracticeData[0];
+
+  const malRegdCol = malHeader.indexOf("Regd. No.");
+  const malCampusCol = malHeader.indexOf("Campus");
+  const malCourseCol = malHeader.indexOf("Course Code");
+  const malMarksCol = malHeader.indexOf("CIE Marks");
+  const malPercentCol = malHeader.indexOf("CIE Percent");
+  const malPointsCol = malHeader.indexOf("CIE Num. Points");
+
+  // ---------- Build lookup ----------
+  const aggregateMap = {};
+
+  for (let i = 1; i < aggregateData.length; i++) {
+    const key =
+      aggregateData[i][aggRegdCol] + "|" +
+      aggregateData[i][aggCampusCol] + "|" +
+      aggregateData[i][aggCourseCol];
+
+    aggregateMap[key] = i;
+  }
+
+  // Existing backgrounds
+  const bgRange = aggregateSheet.getDataRange();
+  const backgrounds = bgRange.getBackgrounds();
+
+  // ---------- Update ----------
+  for (let i = 1; i < malpracticeData.length; i++) {
+
+    const key =
+      malpracticeData[i][malRegdCol] + "|" +
+      malpracticeData[i][malCampusCol] + "|" +
+      malpracticeData[i][malCourseCol];
+
+    if (aggregateMap.hasOwnProperty(key)) {
+
+      const row = aggregateMap[key];
+
+      aggregateData[row][aggMarksCol]   = malpracticeData[i][malMarksCol];
+      aggregateData[row][aggPercentCol] = malpracticeData[i][malPercentCol];
+      aggregateData[row][aggPointsCol]  = malpracticeData[i][malPointsCol];
+      aggregateData[row][aggRemarksCol] = "Malpractice";
+
+      backgrounds[row].fill("#ea9999");
+
+      Logger.log(
+        "Row %s | Regd. No.: %s | Course Code: %s | row made red",
+        row + 1,
+        aggregateData[row][aggRegdCol],
+        aggregateData[row][aggCourseCol]
+      );
+    }
+  }
+
+  // ---------- Write back ----------
+  aggregateSheet.getDataRange().setValues(aggregateData);
+  bgRange.setBackgrounds(backgrounds);
+}
+
+
+
+
+
+function aggregateCIEData(trackingSheet, aggregateSheet) {
+
+  var allDone = true;
+
+  var lastRowTracking = getLastRowInColumn(trackingSheet, 'A');
+
+  //for (var trackRow = 603; trackRow <= 603; trackRow++) {
+  for (var trackRow = 2; trackRow <= lastRowTracking; trackRow++) {
+
+    var fetchedStatus = trackingSheet.getRange(trackRow, 12).getValue();
+    var email = trackingSheet.getRange(trackRow, 8).getValue();
+
+    if (fetchedStatus === "") {
+
+      var marksFileUrl = trackingSheet.getRange(trackRow, 11).getValue();
+      ////
+      
+
+
+      if (marksFileUrl) {
+
+        var marksFile = SpreadsheetApp.openByUrl(marksFileUrl);
+        var marksSheet = marksFile.getSheetByName('Marks Statement');
+
+
+        //// ===== Get certify + allFilled safely =====
+        var certifyRange;
+        try {
+          certifyRange = marksSheet.getRange('certifyCell');
+        } catch (e) {
+          certifyRange = marksSheet.getRange('examinerCertifyCell');
+        }
+
+        var certified = String(certifyRange.getValue()).trim().toLowerCase();
+
+        var allFilled;
+        try {
+          allFilled = String(marksSheet.getRange('allFilledCell').getValue()).trim().toLowerCase();
+        } catch (e) {
+          allFilled = "";
+        }
+
+
+        var paperCode = String(marksSheet.getRange("paperCode").getValue()).trim();
+        //Logger.log(paperCode);
+        var isInternship = paperCode.substring(4, 8) === "-INT";
+        //Logger.log(isInternship)
+
+ 
+        // ===== MAIN CONDITION =====
+        if (certified === "yes" && allFilled === "yes") {
+
+          Logger.log("Eligible for aggregation");
+
+          // ===== STEP 1: Convert editors to viewers =====
+          var fileId = marksFile.getId();
+          var perms = Drive.Permissions.list(fileId).items;
+          var ownerEmail = marksFile.getOwner().getEmail();
+
+          perms.forEach(function(p) {
+            if (p.role === "writer" && p.emailAddress !== ownerEmail) {
+              try {
+                Drive.Permissions.update(
+                  { role: "reader" },
+                  fileId,
+                  p.id,
+                  { sendNotificationEmails: false }
+                );
+              } catch (err) {
+                Logger.log("Failed to convert " + p.emailAddress);
+              }
+            }
+          });
+
+          // ===== STEP 2: Mark completed =====
+          trackingSheet.getRange(trackRow, 12).setValue("Completed");
+
+          // ===== STEP 3: Aggregate =====
+          var numStudents = marksSheet.getRange("numStudentsCell").getValue();
+
+          var regdNosStartRow = marksSheet.getRange('marksStatementRegdNoStart').getRow();
+
+          var progNames = marksSheet.getRange(regdNosStartRow, 1, numStudents, 1).getValues();
+          var semValues = marksSheet.getRange(regdNosStartRow, 2, numStudents, 1).getValues();
+
+          var regdNosCol = marksSheet.getRange('marksStatementRegdNoStart').getColumn();
+          var regdNos = marksSheet.getRange(regdNosStartRow, regdNosCol, numStudents, 1).getValues();
+
+          var paperCode = marksSheet.getRange("paperCode").getValue();
+          var paperCodeArray = Array(numStudents).fill([paperCode]);
+          var teacher = marksSheet.getRange('teacher').getValue();
+          var teacherArray = Array(numStudents).fill([teacher]);
+
+          var marksCol;
+          try {
+            marksCol = marksSheet.getRange("cieTotalMarks").getColumn();
+          } catch (e) {
+            marksCol = marksSheet.getRange("totalMarks").getColumn();
+          }
+          
+          var percentCol = marksSheet.getRange("ciePercent").getColumn();
+          var npCol = marksSheet.getRange("cieNP").getColumn();
+
+          var cieMarks = marksSheet.getRange(regdNosStartRow, marksCol, numStudents, 1).getValues();
+          var ciePercent = marksSheet.getRange(regdNosStartRow, percentCol, numStudents, 1).getValues();
+          var cieNP = marksSheet.getRange(regdNosStartRow, npCol, numStudents, 1).getValues();
+
+          var campus = trackingSheet.getRange(trackRow, 6).getValue();
+          var campusArray = Array(numStudents).fill([campus]);
+
+          var startRow = aggregateSheet.getLastRow() + 1;
+
+          aggregateSheet.getRange(startRow, 1, numStudents, 1).setValues(regdNos);
+          aggregateSheet.getRange(startRow, 2, numStudents, 1).setValues(campusArray);
+          aggregateSheet.getRange(startRow, 3, numStudents, 1).setValues(paperCodeArray);
+          aggregateSheet.getRange(startRow, 4, numStudents, 1).setValues(cieMarks);
+          aggregateSheet.getRange(startRow, 5, numStudents, 1).setValues(ciePercent);
+          aggregateSheet.getRange(startRow, 6, numStudents, 1).setValues(cieNP);
+          aggregateSheet.getRange(startRow, 7, numStudents, 1).setValues(progNames);
+          aggregateSheet.getRange(startRow, 8, numStudents, 1).setValues(semValues);
+          aggregateSheet.getRange(startRow, 9, numStudents, 1).setValues(teacherArray); // Column H
+
+          trackingSheet.getRange(trackRow, 13).setValue("Done");
+
+        } 
+        ////// check if paper is internship paper
+        // *********** for Internship, check row by row
+        // *******************************************//
+        else if (isInternship){
+
+          var numStudents = marksSheet.getRange("numStudentsCell").getDisplayValue();
+          //Logger.log(numStudents)
+          var regdNosStartRow = marksSheet.getRange("marksStatementRegdNoStart").getRow();
+
+          var regdNosCol = marksSheet.getRange("marksStatementRegdNoStart").getColumn();
+
+          var marksCol;
+          try {
+            marksCol = marksSheet.getRange("totalMarks").getColumn();
+          
+          } catch (e) {
+            marksCol = marksSheet.getRange("cieTotalMarks").getColumn();
+          }
+          //Logger.log(marksCol);
+
+
+          var percentCol = marksSheet.getRange("ciePercent").getColumn();
+          var npCol = marksSheet.getRange("cieNP").getColumn();
+          var readyCol = marksSheet.getRange("ready").getColumn();
+          var fetchedCol = marksSheet.getRange("fetched").getColumn();
+
+          var progNames = marksSheet.getRange(regdNosStartRow, 1, numStudents, 1).getValues();
+          var semValues = marksSheet.getRange(regdNosStartRow, 2, numStudents, 1).getValues();
+          var regdNos = marksSheet.getRange(regdNosStartRow, regdNosCol, numStudents, 1).getValues();
+          var cieMarks = marksSheet.getRange(regdNosStartRow, marksCol, numStudents, 1).getValues();
+          var ciePercent = marksSheet.getRange(regdNosStartRow, percentCol, numStudents, 1).getValues();
+          var cieNP = marksSheet.getRange(regdNosStartRow, npCol, numStudents, 1).getValues();
+          var ready = marksSheet.getRange(regdNosStartRow, readyCol, numStudents, 1).getValues();
+          var fetched = marksSheet.getRange(regdNosStartRow, fetchedCol, numStudents, 1).getValues();
+
+          //Logger.log(cieMarks)
+
+          var campus = trackingSheet.getRange(trackRow, 6).getValue();
+
+          var output = [];
+
+          for (var i = 0; i < numStudents; i++) {
+
+            var marksOK = cieMarks[i][0] !== "";
+            var percentOK = ciePercent[i][0] !== "";
+            var npOK = cieNP[i][0] !== "";
+            var readyOK = String(ready[i][0]).trim().toLowerCase() === "yes";
+            var fetchedBlank = String(fetched[i][0]).trim() === "";
+
+            if (marksOK && percentOK && npOK && readyOK && fetchedBlank) {
+
+              output.push([
+                regdNos[i][0],
+                campus,
+                paperCode,
+                cieMarks[i][0],
+                ciePercent[i][0],
+                cieNP[i][0],
+                progNames[i][0],
+                semValues[i][0]
+              ]);
+
+              //marksSheet.getRange(regdNosStartRow + i, fetchedCol).setValue("Fetched");
+
+              var sheetRow = regdNosStartRow + i;
+
+              // Mark as fetched
+              marksSheet.getRange(sheetRow, fetchedCol).setValue("Fetched");
+
+              // Protect E:L of this row
+              var protection = marksSheet.getRange(sheetRow, 5, 1, 8).protect();
+              protection.setDescription("Protected after fetching");
+
+              // Remove all existing editors
+              protection.removeEditors(protection.getEditors());
+
+              // If the spreadsheet belongs to a domain, also disable domain editing
+              if (protection.canDomainEdit()) {
+                protection.setDomainEdit(false);
+              }
+            }
+          }
+
+          if (output.length > 0) {
+            aggregateSheet
+              .getRange(aggregateSheet.getLastRow() + 1, 1, output.length, output[0].length)
+              .setValues(output);
+          }
+
+          // Check whether every row is fetched
+          var remaining = marksSheet
+              .getRange(regdNosStartRow, fetchedCol, numStudents, 1)
+              .getValues()
+              .filter(r => String(r[0]).trim() === "")
+              .length;
+
+          if (remaining === 0) {
+            trackingSheet.getRange(trackRow, 12).setValue("Completed");
+            trackingSheet.getRange(trackRow, 13).setValue("Done");
+          } else {
+            allDone = false;
+          }
+
+        }
+        else {
+          allDone = false;
+        }
+         // closes else of isInternship
+    }     // closes if (marksFileUrl)
+  }       // closes if (fetchedStatus === "")
+}         // closes for (trackRow)
+
+  if (allDone) {
+    deleteAggregateCIETrigger();
+  }
+
+  Logger.log('Data aggregation complete.');
+}
+

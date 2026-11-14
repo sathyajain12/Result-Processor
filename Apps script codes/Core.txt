@@ -1,0 +1,547 @@
+/**
+ * Core.gs
+ * Foundation module — config, logging, sync metadata, utilities
+ *
+ * Sections:
+ *   1. CONFIG LOADER     — load/cache _Config sheet
+ *   2. CONFIG GETTERS    — typed getters for all config params
+ *   3. SYNC METADATA     — timestamp, count, status tracking
+ *   4. LOGGER            — buffered logEvent and convenience wrappers
+ *   5. UTILITIES         — shared helper functions
+ *   6. TEST FUNCTIONS
+ */
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 1: CONFIG LOADER
+// ════════════════════════════════════════════════════════════════════════════
+
+var _configCache       = {};
+var _configCacheLoaded = false;
+
+/**
+ * Load all config from _Config sheet into cache
+ * @return {Object} Full config map
+ */
+function loadConfigSheet() {
+  try {
+    if (_configCacheLoaded && Object.keys(_configCache).length > 0) {
+      return _configCache;
+    }
+    
+    const ss          = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = ss.getSheetByName("_Config");
+    
+    if (!configSheet) throw new Error("_Config sheet not found");
+    
+    const data = configSheet.getDataRange().getValues();
+    _configCache = {};
+    
+    for (let i = 0; i < data.length; i++) {
+      const paramName  = String(data[i][0]).trim();
+      const paramValue = data[i][1];
+      
+      if (paramName && paramName !== "Parameter Name") {
+        _configCache[paramName] = (typeof paramValue === "string")
+          ? paramValue.trim()
+          : paramValue;
+      }
+    }
+    
+    _configCacheLoaded = true;
+    Logger.log("✓ Configuration loaded: " + Object.keys(_configCache).length + " parameters");
+    
+    return _configCache;
+    
+  } catch (error) {
+    Logger.log("ERROR loading config: " + error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get a single config value — throws if missing or empty
+ * Use when param is REQUIRED
+ * @param {string} paramName
+ * @return {*} Parameter value
+ */
+function getConfigValue(paramName) {
+  const config = loadConfigSheet();
+  const value  = config[paramName];
+  
+  if (value === undefined || value === null || value === "") {
+    throw new Error("Config parameter '" + paramName + "' not found or empty in _Config sheet");
+  }
+  
+  return value;
+}
+
+/**
+ * Get a single config value — returns defaultValue if missing
+ * Use when param is OPTIONAL
+ * @param {string} paramName
+ * @param {string} defaultValue
+ * @return {*}
+ */
+function getConfigParam(paramName, defaultValue) {
+  try {
+    return getConfigValue(paramName);
+  } catch (e) {
+    return (defaultValue !== undefined) ? defaultValue : "";
+  }
+}
+
+/**
+ * Force reload config from sheet (clears cache)
+ * @return {Object} Fresh config map
+ */
+function reloadConfigSheet() {
+  _configCache       = {};
+  _configCacheLoaded = false;
+  Logger.log("✓ Config cache cleared");
+  return loadConfigSheet();
+}
+
+/**
+ * Print all config values to log
+ */
+function printAllConfig() {
+  const config = loadConfigSheet();
+  Logger.log("\n════════════════════════════════════");
+  Logger.log("CURRENT CONFIGURATION:");
+  Logger.log("════════════════════════════════════");
+  for (const key in config) {
+    Logger.log(key + " = " + config[key]);
+  }
+  Logger.log("════════════════════════════════════\n");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 2: CONFIG GETTERS
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Fetch File IDs ────────────────────────────────────────────────────────────
+function getCIEFileId()    { return getConfigValue("FETCH_CIE_FILE_ID"); }
+function getCIESheetName() { return getConfigParam("FETCH_CIE_SHEET_NAME", "CIE Aggregate Sheet"); }
+function getESEFileId()    { return getConfigValue("FETCH_ESE_FILE_ID"); }
+function getESESheetName() { return getConfigParam("FETCH_ESE_SHEET_NAME", "ESE Aggregate Sheet"); }
+
+// ── SMF ───────────────────────────────────────────────────────────────────────
+function getSMFFileId()    { return getConfigValue("SMF_FILE_ID"); }
+function getSMFSheetName() { return getConfigParam("SMF_SHEET_NAME", "ESE-Nov 2025"); }
+
+// ── CMF ───────────────────────────────────────────────────────────────────────
+function getCMFFileId()    { return getConfigValue("CMF_FILE_ID"); }
+function getCMFSheetName() { return getConfigParam("CMF_SHEET_NAME", "Sheet1"); }
+
+// ── Sheet Names (structural — never change) ───────────────────────────────────
+function getProcessorSheetName()      { return getConfigParam("PROCESSOR_SHEET_NAME", "Consolidated Result"); }
+function getPaperCodeTableSheetName() { return "Paper Code Table"; }
+function getAcademicYearSheetName()   { return "Academic Year"; }
+function getStage1WorkingSheetName()  { return "Stage1Working"; }
+function getMarksStatementSheetName() { return "Marks Statement"; }
+
+// ── Folder IDs ────────────────────────────────────────────────────────────────
+function getIntegralItemsFolderId() { return getConfigParam("INTEGRAL_ITEMS_FOLDER_ID", ""); }
+
+// ── System Settings ───────────────────────────────────────────────────────────
+function isLoggingEnabled()     { return getConfigParam("ENABLE_LOGGING",     "true").toString().toLowerCase() === "true"; }
+function getRetryAttempts()     { return parseInt(getConfigParam("RETRY_ATTEMPTS",   "3")); }
+function getTimeoutSeconds()    { return parseInt(getConfigParam("TIMEOUT_SECONDS",  "30")); }
+function shouldClearBeforeSync(){ return getConfigParam("CLEAR_BEFORE_SYNC",  "true").toString().toLowerCase() === "true"; }
+function getExpectedMatchRate() { return parseInt(getConfigParam("EXPECTED_MATCH_RATE", "90")); }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 3: SYNC METADATA
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Update last sync timestamp in _SyncStatus sheet
+ */
+function updateLastSyncTimestamp() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let statusSheet = ss.getSheetByName("_SyncStatus");
+    
+    if (!statusSheet) {
+      statusSheet = ss.insertSheet("_SyncStatus");
+      statusSheet.appendRow(["Parameter", "Value"]);
+    }
+    
+    const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    _updateStatusValue(statusSheet, "LAST_SYNC_DATE", timestamp);
+    _updateStatusValue(statusSheet, "SYNC_TYPE",      "INCREMENTAL");
+    
+    Logger.log("✓ Sync timestamp updated: " + timestamp);
+    
+  } catch (error) {
+    Logger.log("Error updating sync timestamp: " + error.message);
+  }
+}
+
+/**
+ * Update last sync record count in _SyncStatus sheet
+ * @param {number} count
+ */
+function updateLastSyncCount(count) {
+  try {
+    const ss          = SpreadsheetApp.getActiveSpreadsheet();
+    const statusSheet = ss.getSheetByName("_SyncStatus");
+    
+    if (statusSheet) {
+      _updateStatusValue(statusSheet, "LAST_SYNC_COUNT", count);
+      Logger.log("✓ Sync count updated: " + count);
+    }
+    
+  } catch (error) {
+    Logger.log("Error updating sync count: " + error.message);
+  }
+}
+
+/**
+ * Get current sync status from _SyncStatus sheet
+ * @return {Object}
+ */
+function getSyncStatus() {
+  try {
+    const ss          = SpreadsheetApp.getActiveSpreadsheet();
+    const statusSheet = ss.getSheetByName("_SyncStatus");
+    
+    if (!statusSheet) {
+      return { lastSyncDate: "Never", syncType: "N/A", lastSyncCount: 0, isFirstSync: true };
+    }
+    
+    const data   = statusSheet.getDataRange().getValues();
+    const status = {};
+    
+    for (const row of data) {
+      const key = String(row[0]).trim();
+      status[key] = row[1];
+    }
+    
+    return {
+      lastSyncDate:  status["LAST_SYNC_DATE"]  || "Never",
+      syncType:      status["SYNC_TYPE"]       || "N/A",
+      lastSyncCount: status["LAST_SYNC_COUNT"] || 0,
+      isFirstSync:   !status["LAST_SYNC_DATE"]
+    };
+    
+  } catch (error) {
+    Logger.log("Error getting sync status: " + error.message);
+    return { lastSyncDate: "Never", syncType: "N/A", lastSyncCount: 0, isFirstSync: true };
+  }
+}
+
+/**
+ * Internal — update or insert a key-value row in a sheet
+ */
+function _updateStatusValue(sheet, key, value) {
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim() === key) {
+      sheet.getRange(i + 1, 2).setValue(value);
+      return;
+    }
+  }
+  
+  sheet.appendRow([key, value]);
+}
+
+/**
+ * Fix _SyncStatus sheet — removes junk rows, keeps only 3 valid keys
+ */
+function fixSyncStatusSheet() {
+  const ss          = SpreadsheetApp.getActiveSpreadsheet();
+  const statusSheet = ss.getSheetByName("_SyncStatus");
+  
+  if (!statusSheet) { Logger.log("_SyncStatus sheet not found"); return; }
+  
+  Logger.log("Current rows: " + statusSheet.getLastRow());
+  
+  const data      = statusSheet.getDataRange().getValues();
+  const validKeys = ["LAST_SYNC_DATE", "SYNC_TYPE", "LAST_SYNC_COUNT"];
+  const kept      = {};
+  
+  for (const row of data) {
+    const key = String(row[0]).trim();
+    if (validKeys.includes(key)) kept[key] = row[1];
+  }
+  
+  statusSheet.clear();
+  statusSheet.appendRow(["Parameter", "Value"]);
+  for (const key of validKeys) statusSheet.appendRow([key, kept[key] || ""]);
+  
+  Logger.log("✓ Fixed _SyncStatus — now has " + statusSheet.getLastRow() + " rows");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 4: LOGGER — BUFFERED
+// ════════════════════════════════════════════════════════════════════════════
+
+var _logBuffer        = [];
+var _logBufferEnabled = true;
+
+/**
+ * Log an event — buffers in memory, writes to _Logs sheet on flushLogs()
+ * Always writes to console immediately
+ * @param {string} eventType
+ * @param {string} phase
+ * @param {string} message
+ * @param {string} status  — "ℹ" "✓" "✗" "⚠" "ⓘ"
+ */
+function logEvent(eventType, phase, message, status) {
+  try {
+    const timestamp = getTimestamp();
+    const icon      = status || "ℹ";
+    const phaseStr  = phase  ? "[Phase " + phase + "] " : "";
+    
+    // Always log to console immediately
+    Logger.log(icon + " [" + timestamp + "] [" + eventType + "] " + phaseStr + message);
+    
+    // Check if sheet logging enabled
+    let loggingOn = true;
+    try { loggingOn = isLoggingEnabled(); } catch(e) { /* config not ready yet */ }
+    if (!loggingOn) return;
+    
+    // Buffer entry
+    _logBuffer.push([timestamp, eventType, phase, message, icon]);
+    
+    // Auto-flush every 100 entries
+    if (_logBuffer.length >= 100) flushLogs();
+    
+  } catch (error) {
+    Logger.log("[logEvent ERROR] " + error.message);
+  }
+}
+
+/**
+ * Flush buffered log entries to _Logs sheet in ONE batch write
+ * Call at the end of each major phase
+ */
+function flushLogs() {
+  try {
+    if (_logBuffer.length === 0) return;
+    
+    const ss        = SpreadsheetApp.getActiveSpreadsheet();
+    const logsSheet = ss.getSheetByName("_Logs");
+    
+    if (!logsSheet) { _logBuffer = []; return; }
+    
+    const lastRow  = logsSheet.getLastRow();
+    const startRow = lastRow + 1;
+    
+    logsSheet.getRange(startRow, 1, _logBuffer.length, 5).setValues(_logBuffer);
+    Logger.log("✓ Flushed " + _logBuffer.length + " log entries to _Logs sheet");
+    
+    _logBuffer = [];
+    
+  } catch (error) {
+    Logger.log("[flushLogs ERROR] " + error.message);
+    _logBuffer = [];
+  }
+}
+
+/**
+ * Clear log buffer without writing to sheet
+ */
+function clearLogBuffer() {
+  _logBuffer = [];
+  Logger.log("Log buffer cleared");
+}
+
+/**
+ * Trim _Logs sheet — keeps last 500 rows only
+ */
+function trimLogsSheet() {
+  try {
+    const ss        = SpreadsheetApp.getActiveSpreadsheet();
+    const logsSheet = ss.getSheetByName("_Logs");
+    
+    if (!logsSheet) return;
+    
+    const lastRow  = logsSheet.getLastRow();
+    const KEEP     = 500;
+    
+    if (lastRow <= KEEP + 1) {
+      Logger.log("_Logs has " + lastRow + " rows — no trim needed");
+      return;
+    }
+    
+    logsSheet.deleteRows(2, lastRow - KEEP - 1);
+    Logger.log("✓ Trimmed _Logs — kept last " + KEEP + " rows");
+    
+  } catch (error) {
+    Logger.log("Error trimming logs: " + error.message);
+  }
+}
+
+// Convenience wrappers
+function logInfo   (module, phase, msg) { logEvent(module, phase, msg, "ℹ"); }
+function logSuccess(module, phase, msg) { logEvent(module, phase, msg, "✓"); }
+function logWarning(module, phase, msg) { logEvent(module, phase, msg, "⚠"); }
+function logError  (module, phase, msg) { logEvent(module, phase, msg, "✗"); }
+
+/**
+ * Get current timestamp in IST
+ * @return {string}
+ */
+function getTimestamp() {
+  return new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    year:     "numeric",
+    month:    "2-digit",
+    day:      "2-digit",
+    hour:     "2-digit",
+    minute:   "2-digit",
+    second:   "2-digit"
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 5: UTILITIES
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Open a Google Drive file by ID
+ * @param {string} fileId
+ * @return {File}
+ */
+function getFileById(fileId) {
+  try {
+    return DriveApp.getFileById(fileId);
+  } catch (error) {
+    throw new Error("Cannot access file '" + fileId + "': " + error.message +
+      "\nCheck: file exists and is shared with this account.");
+  }
+}
+
+/**
+ * Open a Google Spreadsheet by file ID
+ * @param {string} fileId
+ * @return {Spreadsheet}
+ */
+function getSpreadsheetById(fileId) {
+  const file = getFileById(fileId);
+  try {
+    return SpreadsheetApp.open(file);
+  } catch (error) {
+    throw new Error("Cannot open spreadsheet '" + fileId + "': " + error.message);
+  }
+}
+
+/**
+ * Get the active processor spreadsheet
+ * @return {Spreadsheet}
+ */
+function getProcessorSpreadsheet() {
+  return SpreadsheetApp.getActiveSpreadsheet();
+}
+
+/**
+ * Build a hash map from a 2D array for O(1) lookups
+ * @param {Array} data       - 2D array (row 0 = headers)
+ * @param {Array} keyIndices - Column indices for composite key
+ * @return {Object}
+ */
+function createLookupMap(data, keyIndices) {
+  const map = {};
+  for (let i = 1; i < data.length; i++) {
+    const key = keyIndices.map(j => String(data[i][j]).trim()).join("|");
+    map[key]  = data[i];
+  }
+  return map;
+}
+
+/**
+ * Check if a sheet exists
+ * @param {Spreadsheet} ss
+ * @param {string}      sheetName
+ * @return {boolean}
+ */
+function sheetExists(ss, sheetName) {
+  return ss.getSheetByName(sheetName) !== null;
+}
+
+/**
+ * Validate email format
+ * @param {string} email
+ * @return {boolean}
+ */
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/**
+ * Send a notification email
+ * @param {string} to
+ * @param {string} subject
+ * @param {string} body
+ * @return {boolean}
+ */
+function sendNotification(to, subject, body) {
+  try {
+    if (!isValidEmail(to)) {
+      logEvent("ERROR", "NOTIFY", "Invalid email: " + to, "✗");
+      return false;
+    }
+    GmailApp.sendEmail(to, subject, body);
+    logEvent("NOTIFY", "FINAL", "Email sent to " + to, "✓");
+    return true;
+  } catch (error) {
+    logEvent("ERROR", "NOTIFY", "Failed to send email: " + error.message, "✗");
+    return false;
+  }
+}
+
+/**
+ * Update a key-value entry in _SyncStatus sheet
+ * @param {string} key
+ * @param {*}      value
+ */
+function updateStatusDashboard(key, value) {
+  try {
+    const ss          = SpreadsheetApp.getActiveSpreadsheet();
+    const statusSheet = ss.getSheetByName("_SyncStatus");
+    if (statusSheet) _updateStatusValue(statusSheet, key, value);
+  } catch (error) {
+    Logger.log("ERROR in updateStatusDashboard: " + error.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 6: TEST FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+function testConfigGetters() {
+  try {
+    Logger.log("\n═══ TESTING CONFIG GETTERS ═══\n");
+    
+    Logger.log("CIE File ID:         " + getCIEFileId());
+    Logger.log("CIE Sheet Name:      " + getCIESheetName());
+    Logger.log("ESE File ID:         " + getESEFileId());
+    Logger.log("ESE Sheet Name:      " + getESESheetName());
+    Logger.log("SMF File ID:         " + getSMFFileId());
+    Logger.log("SMF Sheet Name:      " + getSMFSheetName());
+    Logger.log("CMF File ID:         " + getCMFFileId());
+    Logger.log("CMF Sheet Name:      " + getCMFSheetName());
+    Logger.log("Processor Sheet:     " + getProcessorSheetName());
+    Logger.log("Paper Code Table:    " + getPaperCodeTableSheetName());
+    Logger.log("Academic Year:       " + getAcademicYearSheetName());
+    Logger.log("Logging Enabled:     " + isLoggingEnabled());
+    Logger.log("Retry Attempts:      " + getRetryAttempts());
+    Logger.log("Timeout Seconds:     " + getTimeoutSeconds());
+    
+    const status = getSyncStatus();
+    Logger.log("\n═══ SYNC STATUS ═══");
+    Logger.log("Last Sync:   " + status.lastSyncDate);
+    Logger.log("Sync Type:   " + status.syncType);
+    Logger.log("Records:     " + status.lastSyncCount);
+    Logger.log("First Sync:  " + status.isFirstSync);
+    Logger.log("═══════════════════");
+    
+    Logger.log("\n═══ TESTS COMPLETE ═══\n");
+    
+  } catch (error) {
+    Logger.log("Test error: " + error.message);
+  }
+}

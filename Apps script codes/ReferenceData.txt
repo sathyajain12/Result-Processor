@@ -1,0 +1,1454 @@
+/**
+ * ReferenceData.gs
+ * Populates all reference tables used by the assessment pipeline
+ *
+ * Merged from:
+ *   - PaperCodeTablePopulator.gs
+ *   - ProgramsTablePopulator.gs
+ *   - Stage1WorkingPopulator.gs
+ *   - AcademicYearPopulator.gs
+ *   - IntegralItemsPopulator.gs
+ *
+ * Sections:
+ *   1. PAPER CODE TABLE   — reads CMF, applies suffixes, writes Paper Code Table
+ *   2. PROGRAMS TABLE     — reads Paper Code Table, writes Programs Table
+ *   3. STAGE1 WORKING     — reads Paper Code Table, writes Stage1Working with formulas
+ *   4. ACADEMIC YEAR      — reads SMF file, writes Academic Year sheet
+ *   5. INTEGRAL ITEMS     — reads folder of integral items files, writes Integral Items sheet
+ */
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 1: PAPER CODE TABLE
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate Paper Code Table from CMF file
+ * @param {string} programFilter - Optional program filter e.g. "BAH-E" or "ALL"
+ * @return {Object} Result with record counts
+ */
+function populatePaperCodeTable(programFilter) {
+  const startTime = new Date();
+  
+  Logger.log("\n═══════════════════════════════════════════════════════");
+  Logger.log("Starting Paper Code Table population");
+  Logger.log("Program Filter: " + (programFilter || "ALL"));
+  Logger.log("═══════════════════════════════════════════════════════\n");
+  
+  try {
+    Logger.log("STEP 1: Reading CMF data...");
+    const cmfData = readCMFData(programFilter);
+    Logger.log("✓ Read " + cmfData.length + " records from CMF");
+    
+    if (cmfData.length === 0) throw new Error("No records found in CMF for the selected program filter");
+    
+    Logger.log("\nSTEP 2: Processing records with suffix logic...");
+    const processedData = processAllRecordsWithSuffixes(cmfData);
+    Logger.log("✓ Processed " + processedData.length + " records");
+    
+    Logger.log("\nSTEP 3: Consolidating duplicate paper codes...");
+    const consolidatedData = consolidateDuplicatePaperCodes(processedData);
+    Logger.log("✓ Consolidated to " + consolidatedData.length + " unique paper codes");
+    
+    Logger.log("\nSTEP 4: Writing to Paper Code Table sheet...");
+    const writeResult = writeToPaperCodeTable(consolidatedData);
+    Logger.log("✓ Written " + writeResult.recordsWritten + " records");
+    
+    const duration = ((new Date() - startTime) / 1000).toFixed(2);
+    
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("✓ PAPER CODE TABLE POPULATION COMPLETED");
+    Logger.log("  CMF Records Read:     " + cmfData.length);
+    Logger.log("  Processed Records:    " + processedData.length);
+    Logger.log("  Final Unique Records: " + consolidatedData.length);
+    Logger.log("  Duration:             " + duration + "s");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    return {
+      success:          true,
+      cmfRecords:       cmfData.length,
+      processedRecords: processedData.length,
+      recordsWritten:   consolidatedData.length,
+      duration:         duration
+    };
+    
+  } catch (error) {
+    Logger.log("\n✗ ERROR in populatePaperCodeTable: " + error.message);
+    return { success: false, message: error.message, recordsWritten: 0 };
+  }
+}
+
+// ── Step 1: Read CMF Data ────────────────────────────────────────────────────
+
+function readCMFData(programFilter) {
+  try {
+    const cmfFileId    = getCMFFileId();
+    const cmfSheetName = getCMFSheetName();
+
+    Logger.log("  Opening CMF file: " + cmfFileId);
+    Logger.log("  Sheet name: " + cmfSheetName);
+
+    const cmfFile  = SpreadsheetApp.openById(cmfFileId);
+    const cmfSheet = cmfFile.getSheetByName(cmfSheetName);
+
+    if (!cmfSheet) throw new Error("CMF sheet '" + cmfSheetName + "' not found");
+
+    const lastRow = cmfSheet.getLastRow();
+    if (lastRow < 2) throw new Error("CMF sheet is empty");
+
+    const allData = cmfSheet.getRange(1, 1, lastRow, cmfSheet.getLastColumn()).getValues();
+    const headers = allData[0];
+
+    Logger.log("  CMF Headers: " + headers.join(", "));
+
+    const colMap = {};
+    for (let i = 0; i < headers.length; i++) {
+      const h = String(headers[i]).trim().toUpperCase();
+
+      if (h === "PROGRAMME CODE")                                        colMap.programCode  = i;
+      if (h === "SEMESTER")                                              colMap.semester     = i;
+      if (h === "COURSE CODE" || h === "COURSE CODE (CC)")               colMap.courseCode   = i;
+      if (h === "COURSE TITLE" || h === "TITLE")                         colMap.courseTitle  = i;
+      if (h === "COURSE TYPE" || h === "T / P" || h === "TYPE")          colMap.courseType   = i;
+      if (h === "CREDITS" || h === "CREDIT" || h === "COURSE CREDITS")   colMap.credits      = i;
+      if (h === "COURSE CATEGORY" || h === "CATEGORY")                   colMap.category     = i;
+      if (h === "SEQUENCE" || h === "SEQ" || h === "SEQ NO" || h === "SEQ.")  colMap.sequence = i;
+      if (h === "CIE MAX" || h === "CIE MARKS")                          colMap.cieMax       = i;
+      if (h === "ESE MAX" || h === "ESE MARKS")                          colMap.eseMax       = i;
+      if (h === "EXAM TYPE" || h === "EXAM" || h === "CALCULATION TYPE") colMap.examType     = i;
+      if (h === "DEGREE")                                                colMap.degree       = i;
+      if (h === "TEACHING DEPARTMENT")                                   colMap.teachingDept = i;
+      if (h === "CIE WTG")                                               colMap.cieWtg       = i;
+      if (h === "ESE WTG")                                               colMap.eseWtg       = i;
+    }
+
+    Logger.log("  Column map: " + JSON.stringify(colMap));
+
+    const required = ["programCode", "semester", "courseCode", "courseTitle", "category"];
+    const missing  = required.filter(k => colMap[k] === undefined);
+    if (missing.length > 0) {
+      Logger.log("  ✗ Missing required columns: " + missing.join(", "));
+      Logger.log("  Available headers: " + headers.map((h, i) => i + ":" + h).join(", "));
+      throw new Error(
+        "CMF missing required columns: " + missing.join(", ") +
+        "\nCheck Apps Script logs for available headers."
+      );
+    }
+
+    const optional        = ["credits", "sequence", "cieMax", "eseMax", "examType", "degree", "teachingDept", "cieWtg", "eseWtg"];
+    const missingOptional = optional.filter(k => colMap[k] === undefined);
+    if (missingOptional.length > 0) {
+      Logger.log("  ℹ Optional columns not found (will use empty): " + missingOptional.join(", "));
+    }
+
+    Logger.log("  Total rows in CMF: " + (lastRow - 1));
+
+    const records      = [];
+    let skippedRecords = 0;
+    let swayamNCCount  = 0;
+    let ihaStripped    = 0;
+
+    for (let i = 1; i < allData.length; i++) {
+      const row = allData[i];
+
+      const programCode  = String(row[colMap.programCode]  || "").trim();
+      const semester     = String(row[colMap.semester]      || "").trim();
+      const rawCode      = String(row[colMap.courseCode]    || "").trim();
+      const courseTitle  = String(row[colMap.courseTitle]   || "").trim();
+      const courseType   = colMap.courseType   !== undefined ? String(row[colMap.courseType]  || "").trim() : "";
+      const credits      = colMap.credits      !== undefined ? row[colMap.credits]             : "";
+      const category     = String(row[colMap.category]     || "").trim();
+      const sequence     = colMap.sequence     !== undefined ? row[colMap.sequence]            : "";
+      const cieMax       = colMap.cieMax       !== undefined ? row[colMap.cieMax]              : "";
+      const eseMax       = colMap.eseMax       !== undefined ? row[colMap.eseMax]              : "";
+      const examType     = colMap.examType     !== undefined ? String(row[colMap.examType]     || "").trim() : "";
+      const degree       = colMap.degree       !== undefined ? String(row[colMap.degree]       || "").trim() : "";
+      const teachingDept = colMap.teachingDept !== undefined
+                             ? String(row[colMap.teachingDept] || "").trim().toUpperCase()
+                             : "";
+
+      // Skip rows with no course code
+      if (!rawCode) { skippedRecords++; continue; }
+
+      // ── Skip SWAYAM NC courses ────────────────────────────────────────────
+      // These are graded externally and never arrive in CIE/ESE fetch files.
+      // Neither the base course nor any IHA variant should appear in any
+      // reference sheet (Paper Code Table, Programs Table, Stage1Working).
+      if (teachingDept === "SWAYAM NC" || teachingDept.includes("SWAYAM NC")) {
+        skippedRecords++;
+        swayamNCCount++;
+        Logger.log("  Skipped SWAYAM NC: [" + rawCode + "] (" + programCode + " | " + semester + ")");
+        continue;
+      }
+
+      // ── Strip _IHA suffix ─────────────────────────────────────────────────
+      // IHA = In-House Assessment variant. Marks for _IHA courses arrive in
+      // fetch files under the base course code (without _IHA). Strip it here
+      // so all downstream processing uses the base code consistently.
+      // Case-insensitive: _IHA, _iha, _Iha are all normalised.
+      const courseCode = rawCode.replace(/_IHA$/i, "");
+      if (courseCode !== rawCode) {
+        ihaStripped++;
+        Logger.log("  _IHA stripped: [" + rawCode + "] → [" + courseCode + "]" +
+          " (" + programCode + " | " + semester + ")");
+      }
+
+      // Apply programme filter
+      if (programFilter && programFilter !== "ALL") {
+        const parts   = programFilter.split("/");
+        const matches = parts.some(p => p.trim() === programCode);
+        if (!matches) { skippedRecords++; continue; }
+      }
+
+      records.push({
+        programCode, semester, courseCode, courseTitle,
+        courseType, credits, category, sequence,
+        cieMax, eseMax, examType, degree, teachingDept
+      });
+    }
+
+    if (skippedRecords > 0) Logger.log("  Skipped " + skippedRecords + " records total" +
+      " (SWAYAM NC: " + swayamNCCount + " | filter/blank: " + (skippedRecords - swayamNCCount) + ")");
+    if (ihaStripped   > 0) Logger.log("  _IHA suffix stripped from " + ihaStripped + " course code(s)");
+
+    Logger.log("  Valid records extracted: " + records.length);
+    return records;
+
+  } catch (error) {
+    Logger.log("✗ ERROR reading CMF data: " + error.message);
+    throw error;
+  }
+}
+
+// ── Step 2: Process Records with Suffixes ────────────────────────────────────
+
+function processAllRecordsWithSuffixes(cmfData) {
+  try {
+    const courseCodeCounts = {};
+    for (const record of cmfData) {
+      courseCodeCounts[record.courseCode] = (courseCodeCounts[record.courseCode] || 0) + 1;
+    }
+    
+    const duplicateCodes  = {};
+    let duplicateCount    = 0;
+    let nonDuplicateCount = 0;
+    
+    for (const code in courseCodeCounts) {
+      if (courseCodeCounts[code] > 1) {
+        duplicateCodes[code] = true;
+        duplicateCount += courseCodeCounts[code];
+      } else {
+        nonDuplicateCount++;
+      }
+    }
+    
+    Logger.log("  Duplicate course codes:     " + Object.keys(duplicateCodes).length + " (" + duplicateCount + " records)");
+    Logger.log("  Non-duplicate course codes: " + nonDuplicateCount + " records");
+    
+    const processedRecords = [];
+    
+    for (const record of cmfData) {
+      const originalCourseCode = record.courseCode;
+      const basePaperCode      = removeAssignSuffix(originalCourseCode);
+      const isAssignVariant    = originalCourseCode.toUpperCase().trim().endsWith("_ASSIGN");
+      
+      let displayPaperCode;
+      
+      if (duplicateCodes[originalCourseCode]) {
+        displayPaperCode      = basePaperCode;
+        const programType     = getProgramType(record.programCode);
+        if (programType !== "Other") displayPaperCode += "-" + programType;
+        displayPaperCode += "-Sem-" + convertSemesterToNumeric(record.semester);
+        displayPaperCode += "-" + record.category;
+      } else {
+        displayPaperCode = basePaperCode;
+      }
+      
+      processedRecords.push({
+        paperCode:       displayPaperCode,
+        courseCategory:  record.category,
+        sequence:        record.sequence,
+        paperTitle:      record.courseTitle,
+        credits:         record.credits,
+        programName:     record.programCode,
+        degree:          transformDegree(record.degree),
+        semester:        record.semester,
+        cieMax:          record.cieMax,
+        eseMax:          record.eseMax,
+        calculationType: record.examType,
+        courseType:      record.courseType,
+        examType:        record.examType,
+        isAssignVariant: isAssignVariant
+      });
+    }
+    
+    Logger.log("  ✓ Suffix processing complete");
+    return processedRecords;
+    
+  } catch (error) {
+    Logger.log("✗ ERROR processing records: " + error.message);
+    throw error;
+  }
+}
+
+// ── Step 3: Consolidate Duplicates ───────────────────────────────────────────
+
+function consolidateDuplicatePaperCodes(processedRecords) {
+  try {
+    const dataDict         = {};
+    let consolidationCount = 0;
+    
+    for (const record of processedRecords) {
+      const paperCode = record.paperCode;
+      
+      if (!dataDict[paperCode]) {
+        dataDict[paperCode] = {
+          paperCode:       paperCode,
+          courseCategory:  record.courseCategory,
+          sequence:        record.sequence,
+          paperTitle:      record.paperTitle,
+          credits:         parseFloat(record.credits) || 0,
+          programNames:    {},
+          degree:          record.degree,
+          semester:        record.semester,
+          cieMax:          record.cieMax,
+          eseMax:          record.eseMax,
+          calculationType: record.calculationType,
+          courseType:      record.courseType,
+          examType:        record.examType
+        };
+        
+        const parts = record.programName.split("/");
+        for (const part of parts) {
+          const t = part.trim();
+          if (t) dataDict[paperCode].programNames[t] = true;
+        }
+        
+      } else {
+        consolidationCount++;
+        
+        if (record.isAssignVariant) {
+          const extra = parseFloat(record.credits) || 0;
+          if (extra > 0) dataDict[paperCode].credits += extra;
+        }
+        
+        const parts = record.programName.split("/");
+        for (const part of parts) {
+          const t = part.trim();
+          if (t) dataDict[paperCode].programNames[t] = true;
+        }
+      }
+    }
+    
+    Logger.log("  Input records:      " + processedRecords.length);
+    Logger.log("  Merged duplicates:  " + consolidationCount);
+    Logger.log("  Final unique codes: " + Object.keys(dataDict).length);
+    
+    const consolidatedRecords = [];
+    
+    for (const paperCode in dataDict) {
+      const data = dataDict[paperCode];
+      consolidatedRecords.push({
+        paperCode:       data.paperCode,
+        courseCategory:  data.courseCategory,
+        sequence:        data.sequence,
+        paperTitle:      data.paperTitle,
+        credits:         data.credits,
+        programName:     Object.keys(data.programNames).sort().join("/"),
+        degree:          data.degree,
+        semester:        data.semester,
+        cieMax:          data.cieMax,
+        eseMax:          data.eseMax,
+        calculationType: data.calculationType,
+        courseType:      data.courseType,
+        examType:        data.examType
+      });
+    }
+    
+    consolidatedRecords.sort(function(a, b) {
+      const aHas = hasSuffix(a.paperCode);
+      const bHas = hasSuffix(b.paperCode);
+      if (aHas && !bHas) return 1;
+      if (!aHas && bHas) return -1;
+      return a.paperCode.localeCompare(b.paperCode);
+    });
+    
+    return consolidatedRecords;
+    
+  } catch (error) {
+    Logger.log("✗ ERROR consolidating records: " + error.message);
+    throw error;
+  }
+}
+
+// ── Step 4: Write to Paper Code Table ────────────────────────────────────────
+
+function writeToPaperCodeTable(consolidatedRecords) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName("Paper Code Table");
+    if (!sheet) sheet = ss.insertSheet("Paper Code Table");
+    
+    sheet.clear();
+    
+    const headers = [
+      "Paper Code", "Course Category", "Sequence", "Paper Title",
+      "Credits", "Program Name - Acronym", "Degree", "Semester",
+      "CIE", "ESE", "Calculation Type", "T / P", "Exam"
+    ];
+    
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#000000");
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setHorizontalAlignment("center");
+    
+    const dataArray = [];
+    
+    for (const record of consolidatedRecords) {
+      let formattedExam = record.examType;
+      if (record.examType) {
+        try {
+          const examDate = new Date(record.examType);
+          if (!isNaN(examDate.getTime())) {
+            formattedExam = Utilities.formatDate(examDate, Session.getScriptTimeZone(), "MMM") +
+                            "-" +
+                            Utilities.formatDate(examDate, Session.getScriptTimeZone(), "yy");
+          }
+        } catch (e) { /* keep original */ }
+      }
+      
+      dataArray.push([
+        record.paperCode, record.courseCategory, record.sequence,
+        record.paperTitle, record.credits, record.programName,
+        record.degree, record.semester, record.cieMax, record.eseMax,
+        record.calculationType, record.courseType, formattedExam
+      ]);
+    }
+    
+    if (dataArray.length > 0) {
+      sheet.getRange(2, 1, dataArray.length, headers.length).setValues(dataArray);
+      sheet.getRange(2, 13, dataArray.length, 1).setNumberFormat("@");
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    
+    const fullRange = sheet.getRange(1, 1, dataArray.length + 1, headers.length);
+    fullRange.setBorder(true, true, true, true, true, true);
+    fullRange.createFilter();
+    sheet.setFrozenRows(1);
+    
+    Logger.log("  ✓ Written " + dataArray.length + " records to Paper Code Table");
+    return { recordsWritten: dataArray.length };
+    
+  } catch (error) {
+    Logger.log("✗ ERROR writing Paper Code Table: " + error.message);
+    throw error;
+  }
+}
+
+// ── Paper Code Table Helpers ──────────────────────────────────────────────────
+
+function convertSemesterToNumeric(semesterValue) {
+  const s   = String(semesterValue).toUpperCase().trim();
+  const map = {
+    "I": "I", "1": "I", "FIRST": "I", "SEM1": "I", "SEM-I": "I",
+    "II": "II", "2": "II", "SECOND": "II", "SEM2": "II", "SEM-II": "II",
+    "III": "III", "3": "III", "THIRD": "III", "SEM3": "III", "SEM-III": "III",
+    "IV": "IV", "4": "IV", "FOURTH": "IV", "SEM4": "IV", "SEM-IV": "IV",
+    "V": "V", "5": "V", "FIFTH": "V", "SEM5": "V", "SEM-V": "V",
+    "VI": "VI", "6": "VI", "SIXTH": "VI", "SEM6": "VI", "SEM-VI": "VI",
+    "VII": "VII", "7": "VII", "SEVENTH": "VII", "SEM7": "VII", "SEM-VII": "VII",
+    "VIII": "VIII", "8": "VIII", "EIGHTH": "VIII", "SEM8": "VIII", "SEM-VIII": "VIII"
+  };
+  return map[s] || s;
+}
+
+function getProgramType(programCode) {
+  const code = String(programCode).toUpperCase().trim();
+  
+  const artsPrograms = [
+    "BAH-E", "BAHR-E", "BAH-ELL", "BAHR-ELL", "BBAH",
+    "MA-E", "MA-ELL", "BCOMH", "BCOMHR", "BED",
+    "BPA-M", "BPAH-M", "MBA"
+  ];
+  for (const p of artsPrograms) {
+    if (code === p || code.includes(p)) return "Arts";
+  }
+  
+  const sciencePrograms = ["BSH-", "BSHR-", "MSC-", "MTECH-"];
+  for (const p of sciencePrograms) {
+    if (code.includes(p)) return "Science";
+  }
+  
+  return "Other";
+}
+
+function removeAssignSuffix(paperCode) {
+  const t = String(paperCode).trim();
+  return t.toUpperCase().endsWith("_ASSIGN") ? t.substring(0, t.length - 7) : t;
+}
+
+function transformDegree(degreeValue) {
+  const map = { "UNDERGRADUATE": "UG", "PROFESSIONAL": "PRO", "POSTGRADUATE": "PG" };
+  return map[String(degreeValue).toUpperCase().trim()] || degreeValue;
+}
+
+/**
+ * Check if a paper code has suffix segments
+ * SINGLE definition — used by both Paper Code Table and Programs Table
+ */
+function hasSuffix(paperCode) {
+  const code     = String(paperCode).trim();
+  const segments = code.split("-");
+  
+  if (segments.length <= 2) return false;
+  
+  const suffixKeywords = [
+    "SEM", "ARTS", "SCIENCE", "COMMERCE", "IDM", "DSE", "SEC",
+    "GE", "AEC", "VAC", "AECC", "MDC", "OE", "REGULAR", "PART", "CBCS"
+  ];
+  const romanNumerals = ["I","II","III","IV","V","VI","VII","VIII","IX","X"];
+  
+  for (let i = 2; i < segments.length; i++) {
+    const seg = segments[i].toUpperCase().trim();
+    if (romanNumerals.includes(seg)) return true;
+    if (suffixKeywords.some(kw => seg === kw || seg.includes(kw))) return true;
+  }
+  
+  return false;
+}
+
+// ── Test ──────────────────────────────────────────────────────────────────────
+
+function testPopulatePaperCodeTable() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING PAPER CODE TABLE POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populatePaperCodeTable("ALL");
+    Logger.log(result.success ? "\n✓ TEST PASSED" : "\n✗ TEST FAILED: " + result.message);
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 2: PROGRAMS TABLE
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate Programs Table from Paper Code Table
+ * @return {Object} Result with record counts
+ */
+function populateProgramsTable() {
+  try {
+    logEvent("PROGRAMS_TABLE", "0", "Starting Programs Table population...", "ℹ");
+    
+    const startTime = Date.now();
+    
+    logEvent("PROGRAMS_TABLE", "1", "Reading programs from Paper Code Table...", "ℹ");
+    const programs = readAndOrganizePrograms();
+    logEvent("PROGRAMS_TABLE", "1", "Found " + programs.length + " programs", "✓");
+    
+    logEvent("PROGRAMS_TABLE", "2", "Assigning mappings...", "ℹ");
+    const programsWithMappings = assignProgramMappings(programs);
+    logEvent("PROGRAMS_TABLE", "2", "Assigned mappings for " + programsWithMappings.length + " programs", "✓");
+    
+    logEvent("PROGRAMS_TABLE", "3", "Writing to Programs Table sheet...", "ℹ");
+    writeToProgramsTable(programsWithMappings);
+    logEvent("PROGRAMS_TABLE", "3", "Programs Table updated successfully", "✓");
+    
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    Logger.log("✓ Programs Table: " + programs.length + " programs in " + duration + "s");
+    
+    return { success: true, totalPrograms: programs.length, recordsWritten: programs.length, duration: duration };
+    
+  } catch (error) {
+    logEvent("ERROR", "0", "Programs Table population failed: " + error.message, "✗");
+    throw error;
+  }
+}
+
+function readAndOrganizePrograms() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Paper Code Table");
+    
+    if (!sheet) throw new Error("Paper Code Table not found — run populatePaperCodeTable() first");
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) throw new Error("Paper Code Table is empty");
+    
+    const data          = sheet.getRange(2, 1, lastRow - 1, 13).getValues();
+    const withSuffix    = [];
+    const withoutSuffix = [];
+    
+    for (const row of data) {
+      const paperCode   = String(row[0]).trim();
+      const programName = String(row[5]).trim();
+      if (!paperCode || !programName) continue;
+      
+      if (hasSuffix(paperCode)) {
+        withSuffix.push(programName);
+      } else {
+        withoutSuffix.push(programName);
+      }
+    }
+    
+    const programsFromSuffixed    = withSuffix.map(code => ({ programCode: code }));
+    const seen                    = new Set();
+    const uniqueFromNonSuffixed   = [];
+    
+    for (const name of withoutSuffix) {
+      if (!seen.has(name)) {
+        uniqueFromNonSuffixed.push({ programCode: name });
+        seen.add(name);
+      }
+    }
+    
+    Logger.log("  With suffix:    " + programsFromSuffixed.length);
+    Logger.log("  Without suffix: " + uniqueFromNonSuffixed.length);
+    
+    return [...programsFromSuffixed, ...uniqueFromNonSuffixed];
+    
+  } catch (error) {
+    Logger.log("ERROR reading programs: " + error.message);
+    throw error;
+  }
+}
+
+function assignProgramMappings(programs) {
+  for (const prog of programs) {
+    const code = prog.programCode.toUpperCase();
+    
+    prog.weightageCategory      = 1;
+    prog.passPercentageCategory = 1;
+    prog.cieNP   = "I-A";
+    prog.eseNP   = "I-A";
+    prog.combNP  = "I-A";
+    prog.gpaToLG = "II-B";
+    
+    if (code.includes("FIRST UG") || code.includes("SECOND UG") || code.includes("THIRD UG")) {
+      prog.passPercentageCategory = 1; prog.gpaToLG = ""; continue;
+    }
+    if (code.includes("FIRST PG") || code.includes("SECOND PG")) {
+      prog.passPercentageCategory = 2; prog.gpaToLG = ""; continue;
+    }
+    if (code.includes("FIRST M.TECH") || code.includes("SECOND M.TECH")) {
+      prog.passPercentageCategory = 3;
+      prog.cieNP = "I-B"; prog.eseNP = "I-B"; prog.combNP = "I-B";
+      prog.gpaToLG = ""; continue;
+    }
+    if (code.includes("MTECH")) {
+      prog.passPercentageCategory = 3;
+      prog.cieNP = "I-B"; prog.eseNP = "I-B"; prog.combNP = "I-B";
+      prog.gpaToLG = "II-A"; continue;
+    }
+    if (code.includes("MA-") || code.includes("MSC-") || code.includes("MBA")) {
+      prog.passPercentageCategory = 2;
+      prog.gpaToLG = code.includes("MSC-") ? "II-A" : "II-B"; continue;
+    }
+    if (code.includes("BSH-") || code.includes("BSHR-")) {
+      prog.passPercentageCategory = 1; prog.gpaToLG = "II-A"; continue;
+    }
+    if (code.includes("BAH-") || code.includes("BAHR-") ||
+        code.includes("BCOMH") || code.includes("BCOMHR") ||
+        code.includes("BBAH") || code.includes("BPAH-") ||
+        code.includes("BPA-") || code.includes("BED")) {
+      prog.passPercentageCategory = 1; prog.gpaToLG = "II-B"; continue;
+    }
+    
+    prog.passPercentageCategory = 1;
+    prog.gpaToLG = "II-B";
+  }
+  
+  return programs;
+}
+
+function writeToProgramsTable(programs) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName("Programs Table");
+    if (!sheet) sheet = ss.insertSheet("Programs Table");
+    
+    sheet.clear();
+    
+    const headers = [
+      "S.No.", "Program Code", "Program Name - Acronym",
+      "Weightage Category", "Pass Percentage Category",
+      "CIE-NP", "ESE-NP", "COMB-NP", "GPA to LG"
+    ];
+    
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#000000");
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setHorizontalAlignment("center");
+    
+    const dataArray = programs.map((prog, idx) => [
+      idx + 1, prog.programCode, prog.programCode,
+      prog.weightageCategory, prog.passPercentageCategory,
+      prog.cieNP, prog.eseNP, prog.combNP, prog.gpaToLG
+    ]);
+    
+    if (dataArray.length > 0) {
+      sheet.getRange(2, 1, dataArray.length, headers.length).setValues(dataArray);
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    
+    const dataRange = sheet.getRange(1, 1, dataArray.length + 1, headers.length);
+    dataRange.setBorder(true, true, true, true, true, true);
+    dataRange.createFilter();
+    
+    Logger.log("✓ Wrote " + dataArray.length + " programs to Programs Table");
+    
+  } catch (error) {
+    Logger.log("ERROR writing Programs Table: " + error.message);
+    throw error;
+  }
+}
+
+function testPopulateProgramsTable() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING PROGRAMS TABLE POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populateProgramsTable();
+    Logger.log("Success: " + result.success);
+    Logger.log("Total Programs: " + result.totalPrograms);
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 3: STAGE1 WORKING
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate Stage1Working — Column A: paper codes, Columns B-N: VLOOKUP formulas
+ * @return {Object} Result with record counts
+ */
+function populateStage1Working() {
+  try {
+    logEvent("STAGE1_WORKING", "0", "Starting Stage1Working population (FORMULA MODE)...", "ℹ");
+    
+    const startTime = Date.now();
+    
+    logEvent("STAGE1_WORKING", "1", "Reading paper codes from Paper Code Table...", "ℹ");
+    const paperCodes = readPaperCodesOnly();
+    logEvent("STAGE1_WORKING", "1", "Read " + paperCodes.length + " paper codes", "✓");
+    
+    logEvent("STAGE1_WORKING", "2", "Writing to Stage1Working sheet...", "ℹ");
+    writeToStage1WorkingSheet(paperCodes);
+    logEvent("STAGE1_WORKING", "2", "Stage1Working updated successfully", "✓");
+    
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    Logger.log("✓ Stage1Working: " + paperCodes.length + " records in " + duration + "s");
+    
+    return { success: true, stage1Records: paperCodes.length, duration: duration };
+    
+  } catch (error) {
+    logEvent("ERROR", "0", "Stage1Working population failed: " + error.message, "✗");
+    throw error;
+  }
+}
+
+function readPaperCodesOnly() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Paper Code Table");
+    
+    if (!sheet) throw new Error("Paper Code Table not found");
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) throw new Error("No data in Paper Code Table");
+    
+    return sheet.getRange(2, 1, lastRow - 1, 1).getValues()
+      .map(row => String(row[0]).trim())
+      .filter(code => code !== "");
+    
+  } catch (error) {
+    Logger.log("ERROR reading paper codes: " + error.message);
+    throw error;
+  }
+}
+
+function getStage1FormulasForRow(row) {
+  return [
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$D,4,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$E,5,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$F,6,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$I,4,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$I,5,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$I,6,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$I,7,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$E,2,FALSE),"")',
+    '=IFERROR(VLOOKUP($D' + row + ',\'Programs Table\'!$C:$E,3,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$H,8,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$I,9,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$J,10,FALSE),"")',
+    '=IFERROR(VLOOKUP($A' + row + ',\'Paper Code Table\'!$A:$K,11,FALSE),"")'
+  ];
+}
+
+function writeToStage1WorkingSheet(paperCodes) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName("Stage1Working");
+    if (!sheet) sheet = ss.insertSheet("Stage1Working");
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow > 0) sheet.getRange(1, 1, lastRow, 14).clearContent();
+    
+    const headers = [
+      "Paper Code", "Paper Name", "Credits", "Program",
+      "CIE-NP", "ESE-NP", "COMB-NP", "GPA to LG",
+      "Weightage Category", "Pass Percentage Category",
+      "Semester", "CIE-Max Marks", "ESE-Max Marks", "Calculation Type"
+    ];
+    
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#000000");
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setHorizontalAlignment("center");
+    
+    const numRows = paperCodes.length;
+    if (numRows === 0) return;
+    
+    sheet.getRange(2, 1, numRows, 1).setValues(paperCodes.map(c => [c]));
+    Logger.log("✓ Written " + numRows + " paper codes to column A");
+    
+    const BATCH_SIZE  = 500;
+    const totalBatches = Math.ceil(numRows / BATCH_SIZE);
+    
+    for (let batch = 0; batch < totalBatches; batch++) {
+      const startIdx = batch * BATCH_SIZE;
+      const endIdx   = Math.min(startIdx + BATCH_SIZE, numRows);
+      const startRow = startIdx + 2;
+      const count    = endIdx - startIdx;
+      
+      const batchFormulas = [];
+      for (let i = 0; i < count; i++) {
+        batchFormulas.push(getStage1FormulasForRow(startRow + i));
+      }
+      
+      let retries = 0;
+      while (retries < 3) {
+        try {
+          sheet.getRange(startRow, 2, count, 13).setFormulas(batchFormulas);
+          Logger.log("  ✓ Batch " + (batch + 1) + "/" + totalBatches + " written");
+          break;
+        } catch (e) {
+          retries++;
+          if (retries >= 3) throw e;
+          Utilities.sleep(2000 * retries);
+        }
+      }
+      
+      if (batch < totalBatches - 1) {
+        SpreadsheetApp.flush();
+        Utilities.sleep(1000);
+      }
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    
+    const dataRange = sheet.getRange(1, 1, numRows + 1, headers.length);
+    dataRange.setBorder(true, true, true, true, true, true);
+    
+    const existingFilter = sheet.getFilter();
+    if (existingFilter) existingFilter.remove();
+    dataRange.createFilter();
+    
+    Logger.log("✓ Stage1Working populated — Column A: values, Columns B-N: formulas");
+    
+  } catch (error) {
+    Logger.log("ERROR writing Stage1Working: " + error.message);
+    throw error;
+  }
+}
+
+function testPopulateStage1Working() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING STAGE1WORKING POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populateStage1Working();
+    Logger.log("Success: " + result.success);
+    Logger.log("Records: " + result.stage1Records);
+    Logger.log("Duration: " + result.duration + "s");
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 4: ACADEMIC YEAR
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate Academic Year sheet from SMF file
+ * @return {Object} Result with record counts
+ */
+function populateAcademicYear() {
+  try {
+    logEvent("ACADEMIC_YEAR", "0", "Starting Academic Year population...", "ℹ");
+    
+    const startTime = Date.now();
+    
+    logEvent("ACADEMIC_YEAR", "1", "Reading student data from SMF...", "ℹ");
+    const studentRecords = readStudentDataFromSMF();
+    logEvent("ACADEMIC_YEAR", "1", "Read " + studentRecords.length + " student records", "✓");
+    
+    logEvent("ACADEMIC_YEAR", "2", "Writing to Academic Year sheet...", "ℹ");
+    writeToAcademicYearSheet(studentRecords);
+    logEvent("ACADEMIC_YEAR", "2", "Academic Year sheet updated successfully", "✓");
+    
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    Logger.log("✓ Academic Year: " + studentRecords.length + " records in " + duration + "s");
+    
+    return { success: true, studentRecords: studentRecords.length, duration: duration };
+    
+  } catch (error) {
+    logEvent("ERROR", "0", "Academic Year population failed: " + error.message, "✗");
+    throw error;
+  }
+}
+
+function readStudentDataFromSMF() {
+  try {
+    const smfFileId    = getSMFFileId();
+    const smfSheetName = getSMFSheetName();
+    
+    if (!smfFileId) throw new Error("SMF_FILE_ID not configured in _Config sheet");
+    
+    const smfFile  = DriveApp.getFileById(smfFileId);
+    const smfSS    = SpreadsheetApp.open(smfFile);
+    const smfSheet = smfSS.getSheetByName(smfSheetName);
+    
+    if (!smfSheet) throw new Error("SMF sheet '" + smfSheetName + "' not found");
+    
+    const lastRow = smfSheet.getLastRow();
+    if (lastRow < 2) throw new Error("No data found in SMF sheet");
+    
+    const data   = smfSheet.getRange(1, 1, lastRow, smfSheet.getLastColumn()).getValues();
+    const colMap = buildSMFColumnMap(data[0]);
+    
+    validateSMFColumns(colMap);
+    
+    const records = [];
+    for (let i = 1; i < data.length; i++) {
+      const row    = data[i];
+      const regnNo = String(row[colMap.regnNo]).trim();
+      if (!regnNo) continue;
+      
+      records.push({
+        slNo:        row[colMap.slNo],
+        campus:      String(row[colMap.campus]).trim(),
+        regnNo:      regnNo,
+        gcNo:        "",
+        semester:    String(row[colMap.semester]).trim(),
+        name:        String(row[colMap.name]).trim(),
+        programName: String(row[colMap.programmeCode]).trim()
+      });
+    }
+    
+    Logger.log("✓ Read " + records.length + " student records from SMF");
+    return records;
+    
+  } catch (error) {
+    Logger.log("ERROR reading student data from SMF: " + error.message);
+    throw error;
+  }
+}
+
+function buildSMFColumnMap(headers) {
+  const map = {};
+  for (let i = 0; i < headers.length; i++) {
+    switch (String(headers[i]).trim()) {
+      case "Sl. No.":        map.slNo         = i; break;
+      case "Campus":         map.campus        = i; break;
+      case "Regd. No.":      map.regnNo        = i; break;
+      case "Semester":       map.semester      = i; break;
+      case "Name":           map.name          = i; break;
+      case "Programme Code": map.programmeCode = i; break;
+    }
+  }
+  return map;
+}
+
+function validateSMFColumns(colMap) {
+  const required = ["slNo", "campus", "regnNo", "semester", "name", "programmeCode"];
+  const missing  = required.filter(f => colMap[f] === undefined);
+  if (missing.length > 0) throw new Error("Missing required columns in SMF: " + missing.join(", "));
+}
+
+function writeToAcademicYearSheet(studentRecords) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName("Academic Year");
+    if (!sheet) sheet = ss.insertSheet("Academic Year");
+    
+    sheet.clear();
+    
+    const headers = [
+      "Sl. No.", "Campus", "Regd.No.", "GC_No",
+      "Semester", "Name", "Name of the Programe"
+    ];
+    
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#000000");
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setHorizontalAlignment("center");
+    
+    const dataArray = studentRecords.map(r => [
+      r.slNo, r.campus, r.regnNo, r.gcNo, r.semester, r.name, r.programName
+    ]);
+    
+    if (dataArray.length > 0) {
+      sheet.getRange(2, 1, dataArray.length, headers.length).setValues(dataArray);
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    
+    const dataRange = sheet.getRange(1, 1, dataArray.length + 1, headers.length);
+    dataRange.setBorder(true, true, true, true, true, true);
+    dataRange.createFilter();
+    
+    Logger.log("✓ Wrote " + dataArray.length + " records to Academic Year sheet");
+    
+  } catch (error) {
+    Logger.log("ERROR writing Academic Year sheet: " + error.message);
+    throw error;
+  }
+}
+
+function testPopulateAcademicYear() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING ACADEMIC YEAR POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populateAcademicYear();
+    Logger.log("Success: " + result.success);
+    Logger.log("Student Records: " + result.studentRecords);
+    Logger.log("Duration: " + result.duration + "s");
+    Logger.log(result.success ? "\n✓ Academic Year sheet populated successfully!" : "\n✗ FAILED");
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 5: INTEGRAL ITEMS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate Integral Items sheet from multiple files in a folder
+ * @return {Object} Result with record counts
+ */
+function populateIntegralItems() {
+  try {
+    logEvent("INTEGRAL_ITEMS", "0", "Starting Integral Items population...", "ℹ");
+    
+    const startTime = Date.now();
+    
+    logEvent("INTEGRAL_ITEMS", "1", "Reading integral items files from folder...", "ℹ");
+    const integralData = readIntegralItemsFromFolder();
+    logEvent("INTEGRAL_ITEMS", "1", "Read " + Object.keys(integralData).length + " student records", "✓");
+    
+    logEvent("INTEGRAL_ITEMS", "2", "Calculating totals...", "ℹ");
+    const processedData = calculateTotalsAndItems(integralData);
+    logEvent("INTEGRAL_ITEMS", "2", "Processed " + processedData.length + " records", "✓");
+    
+    logEvent("INTEGRAL_ITEMS", "3", "Writing to Integral Items sheet...", "ℹ");
+    writeToIntegralItemsSheet(processedData);
+    logEvent("INTEGRAL_ITEMS", "3", "Integral Items sheet updated successfully", "✓");
+    
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    Logger.log("✓ Integral Items: " + processedData.length + " records in " + duration + "s");
+    
+    return { success: true, studentRecords: processedData.length, duration: duration };
+    
+  } catch (error) {
+    logEvent("ERROR", "0", "Integral Items population failed: " + error.message, "✗");
+    throw error;
+  }
+}
+
+function readIntegralItemsFromFolder() {
+  try {
+    const folderId = getIntegralItemsFolderId();
+    if (!folderId) throw new Error("INTEGRAL_ITEMS_FOLDER_ID not configured in _Config sheet");
+    
+    const folder       = DriveApp.getFolderById(folderId);
+    const files        = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    const integralData = {};
+    let filesProcessed = 0;
+    
+    while (files.hasNext()) {
+      const file     = files.next();
+      const fileName = file.getName();
+      
+      if (!fileName.includes("Integral Items-Data Entry")) continue;
+      
+      Logger.log("  Processing: " + fileName);
+      
+      try {
+        const ss    = SpreadsheetApp.open(file);
+        const sheet = ss.getSheetByName("Consolidated");
+        
+        if (!sheet) { Logger.log("    ⚠ No 'Consolidated' sheet in " + fileName); continue; }
+        
+        const lastRow = sheet.getLastRow();
+        if (lastRow < 2) continue;
+        
+        const data   = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+        const colMap = buildIntegralItemsColumnMap(data[0]);
+        
+        if (!validateIntegralItemsColumns(colMap, fileName)) continue;
+        
+        for (let i = 1; i < data.length; i++) {
+          const regnNo = String(data[i][colMap.regnNo]).trim();
+          if (!regnNo) continue;
+          
+          integralData[regnNo] = {
+            regnNo: regnNo,
+            int1:   data[i][colMap.item1] || "",
+            int2:   data[i][colMap.item2] || "",
+            int3:   data[i][colMap.item3] || "",
+            int4:   data[i][colMap.item4] || "",
+            int5:   data[i][colMap.item5] || ""
+          };
+        }
+        
+        filesProcessed++;
+        
+      } catch (fileError) {
+        Logger.log("    ⚠ Error in " + fileName + ": " + fileError.message);
+      }
+    }
+    
+    Logger.log("✓ Processed " + filesProcessed + " files, " + Object.keys(integralData).length + " students");
+    return integralData;
+    
+  } catch (error) {
+    Logger.log("ERROR reading integral items: " + error.message);
+    throw error;
+  }
+}
+
+function buildIntegralItemsColumnMap(headers) {
+  const map = {};
+  for (let i = 0; i < headers.length; i++) {
+    switch (String(headers[i]).trim()) {
+      case "Regd.No.":  map.regnNo = i; break;
+      case "Item-1-NP": map.item1  = i; break;
+      case "Item-2-NP": map.item2  = i; break;
+      case "Item-3-NP": map.item3  = i; break;
+      case "Item-4-NP": map.item4  = i; break;
+      case "Item-5-NP": map.item5  = i; break;
+    }
+  }
+  return map;
+}
+
+function validateIntegralItemsColumns(colMap, fileName) {
+  const required = ["regnNo","item1","item2","item3","item4","item5"];
+  const missing  = required.filter(f => colMap[f] === undefined);
+  if (missing.length > 0) {
+    Logger.log("    ⚠ Missing columns in " + fileName + ": " + missing.join(", "));
+    return false;
+  }
+  return true;
+}
+
+function calculateTotalsAndItems(integralData) {
+  const records = [];
+  
+  for (const regnNo in integralData) {
+    const r    = integralData[regnNo];
+    const vals = [r.int1, r.int2, r.int3, r.int4, r.int5].map(processItemValue);
+    
+    let total = 0, count = 0;
+    for (const v of vals) {
+      if (v !== "X") { total += parseFloat(v); count++; }
+    }
+    
+    records.push({
+      regnNo: regnNo,
+      int1: vals[0], int2: vals[1], int3: vals[2],
+      int4: vals[3], int5: vals[4],
+      total: Math.round(total * 100) / 100,
+      items: count
+    });
+  }
+  
+  records.sort((a, b) => a.regnNo.localeCompare(b.regnNo));
+  return records;
+}
+
+function processItemValue(value) {
+  if (value === "" || value === null || value === undefined) return "X";
+  const str = String(value).trim();
+  if (str === "") return "X";
+  const num = parseFloat(str);
+  return isNaN(num) ? "X" : num;
+}
+
+function writeToIntegralItemsSheet(records) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName("Integral Items");
+    if (!sheet) sheet = ss.insertSheet("Integral Items");
+    
+    sheet.clear();
+    
+    const headers = ["Regd No", "INT1_NP", "INT2_NP", "INT3_NP", "INT4_NP", "INT5_NP", "Total", "Items"];
+    
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight("bold");
+    headerRange.setBackground("#000000");
+    headerRange.setFontColor("#FFFFFF");
+    headerRange.setHorizontalAlignment("center");
+    
+    const dataArray = records.map(r => [
+      r.regnNo, r.int1, r.int2, r.int3, r.int4, r.int5, r.total, r.items
+    ]);
+    
+    if (dataArray.length > 0) {
+      sheet.getRange(2, 1, dataArray.length, headers.length).setValues(dataArray);
+      sheet.getRange(2, 7, dataArray.length, 1).setNumberFormat("0.00");
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    
+    const dataRange = sheet.getRange(1, 1, dataArray.length + 1, headers.length);
+    dataRange.setBorder(true, true, true, true, true, true);
+    dataRange.createFilter();
+    
+    Logger.log("✓ Wrote " + dataArray.length + " records to Integral Items sheet");
+    
+  } catch (error) {
+    Logger.log("ERROR writing Integral Items sheet: " + error.message);
+    throw error;
+  }
+}
+
+function testPopulateIntegralItems() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING INTEGRAL ITEMS POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populateIntegralItems();
+    Logger.log("Success: " + result.success);
+    Logger.log("Records: " + result.studentRecords);
+    Logger.log("Duration: " + result.duration + "s");
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+  }
+}
+
+function populateAllReferenceData() {
+  const ui = SpreadsheetApp.getUi();
+
+  const response = ui.alert(
+    "Populate All Reference Data",
+    "This will run all 4 steps in order:\n\n" +
+    "  Step 1 — Paper Code Table  (reads CMF file)\n" +
+    "  Step 2 — Programs Table    (reads Paper Code Table)\n" +
+    "  Step 3 — Stage1 Working    (reads Paper Code Table)\n" +
+    "  Step 4 — Academic Year     (reads SMF file)\n\n" +
+    "Existing data will be cleared and rewritten.\n\nContinue?",
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) return;
+
+  try {
+    const startTime = new Date();
+
+    // ── Step 1: Paper Code Table ─────────────────────────────────────────
+    Logger.log("═══ STEP 1: PAPER CODE TABLE ═══");
+    const r1 = populatePaperCodeTable("ALL");
+    if (!r1.success) throw new Error("Step 1 failed: " + r1.message);
+    Logger.log("✓ Paper Code Table: " + r1.recordsWritten + " records");
+
+    // ── Step 2: Programs Table ───────────────────────────────────────────
+    Logger.log("═══ STEP 2: PROGRAMS TABLE ═══");
+    const r2 = populateProgramsTable();
+    if (!r2.success) throw new Error("Step 2 failed");
+    Logger.log("✓ Programs Table: " + r2.totalPrograms + " programs");
+
+    // ── Step 3: Stage1 Working ───────────────────────────────────────────
+    Logger.log("═══ STEP 3: STAGE1 WORKING ═══");
+    const r3 = populateStage1Working();
+    if (!r3.success) throw new Error("Step 3 failed");
+    Logger.log("✓ Stage1 Working: " + r3.stage1Records + " records");
+
+    // ── Step 4: Academic Year ────────────────────────────────────────────
+    Logger.log("═══ STEP 4: ACADEMIC YEAR ═══");
+    const r4 = populateAcademicYear();
+    if (!r4.success) throw new Error("Step 4 failed");
+    Logger.log("✓ Academic Year: " + r4.studentRecords + " records");
+
+    const duration = ((new Date() - startTime) / 1000).toFixed(1);
+
+    ui.alert(
+      "✓ All Steps Completed",
+      "All reference data populated in " + duration + "s\n\n" +
+      "Step 1 — Paper Code Table : " + r1.recordsWritten  + " records\n" +
+      "Step 2 — Programs Table   : " + r2.totalPrograms   + " programs\n" +
+      "Step 3 — Stage1 Working   : " + r3.stage1Records   + " records\n" +
+      "Step 4 — Academic Year    : " + r4.studentRecords  + " students\n\n" +
+      "You can now run a Full Sync.",
+      ui.ButtonSet.OK
+    );
+
+  } catch (error) {
+    Logger.log("ERROR in populateAllReferenceData: " + error.message);
+    ui.alert(
+      "Error",
+      "Reference data population failed:\n\n" + error.message +
+      "\n\nCheck Apps Script logs for details.",
+      ui.ButtonSet.OK
+    );
+  }
+}
+
+function diagnoseSMFAccess() {
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    // Step 1: Check config loads at all
+    const smfFileId    = getSMFFileId();
+    const smfSheetName = getSMFSheetName();
+
+    Logger.log("SMF File ID:    [" + smfFileId    + "]");
+    Logger.log("SMF Sheet Name: [" + smfSheetName + "]");
+
+    if (!smfFileId || smfFileId.trim() === "") {
+      ui.alert("Config Error", "SMF_FILE_ID is empty in _Config sheet.", ui.ButtonSet.OK);
+      return;
+    }
+
+    // Step 2: Try DriveApp access
+    Logger.log("Trying DriveApp.getFileById...");
+    let file;
+    try {
+      file = DriveApp.getFileById(smfFileId);
+      Logger.log("✓ DriveApp access OK — File name: " + file.getName());
+    } catch (e) {
+      Logger.log("✗ DriveApp failed: " + e.message);
+      ui.alert(
+        "Drive Access Failed",
+        "Cannot access SMF file via DriveApp.\n\n" +
+        "File ID: " + smfFileId + "\n\n" +
+        "Possible causes:\n" +
+        "1. Wrong file ID in _Config sheet\n" +
+        "2. File not shared with this Google account\n" +
+        "3. File was deleted or moved\n\n" +
+        "How to get the correct ID:\n" +
+        "Open the SMF file → look at the URL:\n" +
+        "docs.google.com/spreadsheets/d/FILE_ID_IS_HERE/edit",
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+
+    // Step 3: Try SpreadsheetApp open
+    Logger.log("Trying SpreadsheetApp.open...");
+    let ss;
+    try {
+      ss = SpreadsheetApp.open(file);
+      Logger.log("✓ SpreadsheetApp open OK — " + ss.getSheets().length + " sheets found");
+    } catch (e) {
+      Logger.log("✗ SpreadsheetApp.open failed: " + e.message);
+      ui.alert(
+        "Spreadsheet Open Failed",
+        "File found in Drive but cannot open as spreadsheet.\n\n" +
+        "Is the SMF file actually a Google Sheet?\n" +
+        "Error: " + e.message,
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+
+    // Step 4: Check sheet exists
+    Logger.log("Looking for sheet: [" + smfSheetName + "]");
+    const allSheets = ss.getSheets().map(s => s.getName());
+    Logger.log("Available sheets: " + allSheets.join(", "));
+
+    const smfSheet = ss.getSheetByName(smfSheetName);
+    if (!smfSheet) {
+      ui.alert(
+        "Sheet Not Found",
+        "File opened successfully but sheet '" + smfSheetName + "' not found.\n\n" +
+        "Available sheets in the file:\n" +
+        allSheets.join("\n") + "\n\n" +
+        "Fix: Update SMF_SHEET_NAME in _Config to match one of the above.",
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+
+    Logger.log("✓ Sheet found — " + smfSheet.getLastRow() + " rows");
+
+    // Step 5: Check headers
+    const headers = smfSheet.getRange(1, 1, 1, smfSheet.getLastColumn()).getValues()[0];
+    Logger.log("Headers found: " + headers.join(", "));
+
+    const required = ["Sl. No.", "Campus", "Regd. No.", "Semester", "Name", "Programme Code"];
+    const missing  = required.filter(h => !headers.includes(h));
+
+    if (missing.length > 0) {
+      ui.alert(
+        "Missing Headers",
+        "Sheet found but these required column headers are missing:\n\n" +
+        missing.join("\n") + "\n\n" +
+        "Headers found in sheet:\n" +
+        headers.filter(h => h).join(", "),
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+
+    // All good
+    ui.alert(
+      "✓ SMF Access OK",
+      "Everything looks good:\n\n" +
+      "File:   " + file.getName()      + "\n" +
+      "Sheet:  " + smfSheetName        + "\n" +
+      "Rows:   " + smfSheet.getLastRow() + "\n\n" +
+      "You can now run Populate Academic Year.",
+      ui.ButtonSet.OK
+    );
+
+  } catch (error) {
+    Logger.log("Unexpected error: " + error.message);
+    ui.alert("Error", error.message, ui.ButtonSet.OK);
+  }
+}

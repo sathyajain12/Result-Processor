@@ -1,0 +1,21 @@
+# Daily Mark sheets fetch for the Result Processor.
+# Runs every minute from 05:30 to 15:29 IST (00:00-09:59 UTC). Each run checks a small batch of sheets not checked in the
+# last 20 hours (DAILY_BUDGET, 2 by default: reading a sheet takes about 3 ms of CPU and the Workers Free plan allows a run
+# 10 ms), so about 1,200 sheets are covered each day, using about 4 of Google's 60 reads a minute. On the Paid plan, raise
+# DAILY_BUDGET (e.g. 25) and shorten the window.
+name = "sssihl-result-processor-daily-fetch"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = false   # no public URL; it only runs on the schedule
+
+[triggers]
+crons = ["* 0-9 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "result-processor"
+database_id = "dba7a181-783d-4aaa-a387-034e2a7d6dd1"   # same id as ../wrangler.toml
+
+# Secrets (same values as the Pages app):
+#   npx wrangler secret put GOOGLE_SA_EMAIL --config cron/wrangler.toml
+#   npx wrangler secret put GOOGLE_SA_KEY   --config cron/wrangler.toml

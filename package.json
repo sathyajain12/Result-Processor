@@ -1,0 +1,7 @@
+{
+  "name": "sssihl-result-processor-root",
+  "private": true,
+  "scripts": {
+    "test": "cd engine && npm test"
+  }
+}

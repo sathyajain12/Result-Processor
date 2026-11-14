@@ -1,0 +1,632 @@
+// Authored by Subramanian S Iyer Nov 2024
+
+//var cieSheetNames = ['Course_Master-Apr 2026-ATP', 'Course_Master-Apr 2026-BRN', 'Course_Master-Apr 2026-NDG', 'Course_Master-Apr 2026-PSN'];
+var eseSheetName = ['Course_Master-Apr 2026-ESE']; // name of ESE master Google Sheet
+
+//var cieSheetNames = setSheetNames().cieSheetNames
+//var eseSheetName = setSheetNames().eseSheetName
+
+
+
+var ss = SpreadsheetApp.getActiveSpreadsheet();
+var markSheetName = 'Marks Statement' ; //'Sheet1'
+
+function onOpen(){
+  var ui = SpreadsheetApp.getUi();
+  // Create a new menu and add an item to it
+  //.addItem('Fetch Both CIE & ESE', 'aggregateCIEAndESE')
+  ui.createMenu('Apps Script Codes') // The name of the menu
+    //.addItem('Fill CIE Tracking Sheet', 'createCIETrackingSheet')
+    .addItem('Create & Fill ESE Tracking Sheet', 'createESETrackingSheet')
+    .addItem('Create Aggregate Sheet headers', 'createESEAggregateSheet')
+    .addItem('Fill ESE Aggregate Sheet', 'aggregateESE')
+    .addItem('Set daily trigger to fetch data', 'setTrigger')
+    .addItem('Track Total Completion Status', 'trackESECompletionStatus')
+    .addItem('Set Malpractice marks', 'updateMalpracticeInESEAggregate')
+    //.addItem('Fill CIE Aggregate Sheet', 'aggregateCIE')
+    .addToUi(); // Add the menu to the user interface
+}
+
+
+function setTrigger(){
+  // Create a time-based trigger to run the function daily at 2 PM
+  /*
+  ScriptApp.newTrigger('aggregateCIE')
+    .timeBased()
+    .everyDays(1)
+    .atHour(10) 
+    .create();
+   */ 
+
+    // Create a time-based trigger to run the function daily at 2 PM
+  ScriptApp.newTrigger('aggregateESE')
+    .timeBased()
+    .everyDays(1)
+    .atHour(10) 
+    .create();
+
+}
+
+
+
+
+
+
+// Function to delete the trigger (if necessary)
+function deleteAggregateESETrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'aggregateESE') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+
+function aggregateESEData(trackingSheet, aggregateSheet) {
+  // List of Google Sheets to be processed
+  var allDone = true
+
+  // Process the URLs in the tracking sheet, column I (Marks File Url)
+  var lastRowTracking = getLastRowInColumn(trackingSheet, 'A');
+  for (var trackRow = 2; trackRow <= lastRowTracking; trackRow++) {
+    Logger.log(trackRow)
+    var fetchedStatus = trackingSheet.getRange(trackRow, 13).getValue(); // Column K for Fetched
+    var email = trackingSheet.getRange(trackRow, 7).getValue(); // column G
+    if (fetchedStatus === "") { // Only process if "Fetched" column is blank
+      var marksFileUrl = trackingSheet.getRange(trackRow, 11).getValue(); // Column I for Marks File Url
+      if (marksFileUrl) {
+        var marksFile = SpreadsheetApp.openByUrl(marksFileUrl);
+        var markSheetName = 'Marks Statement'
+        var marksSheet = SpreadsheetApp.openByUrl(marksFileUrl).getSheetByName(markSheetName);
+        
+        // Check certifyCell and allFilledCell
+        //var certified = marksSheet.getRange('examinerCertifyCell').getValue();
+        var certifyRange;
+        try {
+          certifyRange = marksSheet.getRange('examinerCertifyCell');
+        } catch (e) {
+          certifyRange = marksSheet.getRange('certifyCell');
+        }
+        var certified = certifyRange.getValue();
+
+        var allFilled = marksSheet.getRange('allFilledCell').getValue();
+        var teacher = marksSheet.getRange('teacher').getValue();
+        
+        var editors = marksFile.getEditors().map(editor => editor.getEmail());
+
+        
+        var validation;
+        try {
+          validation = String(marksSheet.getRange('validationCell').getValue()).trim().toLowerCase();
+        } catch (e) {
+          validation = "";
+        }
+
+                  
+        var paperCode = marksSheet.getRange("paperCode").getValue();
+        var regdNoFirst = marksSheet.getRange('marksStatementRegdNoStart').getValue();
+        // if paper details or regn nos are missing
+        if (!paperCode || String(paperCode).trim() === "" || !regdNoFirst || String(regdNoFirst).trim() === "") {
+          trackingSheet.getRange(trackRow, 12).setValue("Data Missing");
+          continue;
+        }
+        
+        //if (certified == "Yes" && allFilled == "Yes") {
+        if (certified == "Yes" && allFilled == "Yes" && validation == "Yes" && !editors.includes(email)) {
+        //if (certified == "Yes" && allFilled == "Yes" && !editors.includes(email)) {
+
+          // Remove all editors from the file
+          var fileId = marksFile.getId();
+          var perms = Drive.Permissions.list(fileId).items;
+          var ownerEmail = marksFile.getOwner().getEmail();
+
+          editors.forEach(function(ed) {
+            // Skip owner
+            if (ed === ownerEmail) return;
+
+            try {
+              perms.forEach(function(p) {
+                // Only downgrade if this permission belongs to the editor and is writer
+                if (p.role === "writer" && p.emailAddress === ed) {
+                  Drive.Permissions.update(
+                    { role: "reader" },          // downgrade to viewer
+                    fileId,
+                    p.id,
+                    { sendNotificationEmails: false }  // NO NOTIFICATIONS
+                  );
+                }
+              });
+            } catch (err) {
+              Logger.log("Failed to convert " + ed + " to viewer: " + err);
+            }
+          });
+
+
+          
+          // Mark as Completed in the tracking sheet (Column J)
+          trackingSheet.getRange(trackRow, 12).setValue("Completed");
+
+          // Aggregate data into the first sheet (Sheet 1)
+          
+          var numStudents = marksSheet.getRange("numStudentsCell").getValue();
+
+          
+          
+
+          
+          // modified Aug 2025 Sem is Col B of Marks Statement
+          //var regdNos = marksSheet.getRange(3, 3, numStudents).getValues(); // Column B for Regd Nos
+
+          var regdNosStartRow = marksSheet.getRange('marksStatementRegdNoStart').getRow();
+          
+          var regdNosCol = marksSheet.getRange('marksStatementRegdNoStart').getColumn();
+          var progNames = marksSheet.getRange(regdNosStartRow, 1, numStudents,1).getValues(); // Column A for Prog name
+          var regdNos = marksSheet.getRange(regdNosStartRow, regdNosCol, numStudents,1).getValues(); // Column D for Regd Nos
+          var semValues = marksSheet.getRange(regdNosStartRow, 2, numStudents,1).getValues(); // Column B for Sem
+
+          //var semesterCol = marksSheet.getRange('marksStatementSemNumStart').getColumn();
+          //var semesterArray = marksSheet.getRange(regdNosStartRow, semesterCol, numStudents).getValues(); // new version marks template
+
+          //var semester = marksFile.getRangeByName("semester").getValue();
+          //var semesterArray = Array(numStudents).fill([semester]);
+
+
+          var paperCodeArray = Array(numStudents).fill([paperCode]);
+          var teacherArray = Array(numStudents).fill([teacher]);
+          
+          var marksCol = marksSheet.getRange("totalMarks").getColumn();
+          var percentCol = marksSheet.getRange("esePercent").getColumn();
+          var npCol = marksSheet.getRange("eseNP").getColumn();
+          
+          //var eseData = marksSheet.getRange(regdNosStartRow, marksCol, numStudents, npCol - marksCol + 1).getValues(); // Percent and NP
+          var eseMarks = marksSheet.getRange(regdNosStartRow, marksCol, numStudents, 1).getValues(); // Percent and NP
+          var esePercent = marksSheet.getRange(regdNosStartRow, percentCol, numStudents, 1).getValues(); // Percent and NP
+          var eseNP = marksSheet.getRange(regdNosStartRow, npCol, numStudents, 1).getValues(); // Percent and NP
+
+
+
+
+
+          // Get the current startRow in the aggregate sheet
+          var startRow = aggregateSheet.getLastRow() + 1;
+          
+          // Paste Regd Nos, Paper Code, and CIE data into the aggregate sheet
+          aggregateSheet.getRange(startRow, 1, numStudents, 1).setValues(regdNos); // Column A for Regd Nos
+          aggregateSheet.getRange(startRow, 2, numStudents, 1).setValues(paperCodeArray); // Column B for Paper Code
+          // aggregateSheet.getRange(startRow, 3, numStudents, 3).setValues(eseData); // Column C and D for Percent and NP
+          aggregateSheet.getRange(startRow, 3, numStudents, 1).setValues(eseMarks); // Column C and D for Percent and NP
+          aggregateSheet.getRange(startRow, 4, numStudents, 1).setValues(esePercent); // Column C and D for Percent and NP
+          aggregateSheet.getRange(startRow, 5, numStudents, 1).setValues(eseNP); // Column C and D for Percent and NP
+          aggregateSheet.getRange(startRow, 6, numStudents, 1).setValues(progNames); // Column F
+          aggregateSheet.getRange(startRow, 7, numStudents, 1).setValues(semValues); // Column G
+          aggregateSheet.getRange(startRow, 8, numStudents, 1).setValues(teacherArray); // Column H
+
+          // Mark "Done" in the Fetch Status column (Column M) of the tracking sheet
+          trackingSheet.getRange(trackRow, 13).setValue("Done");
+        }
+        else{
+          allDone = false
+        }
+      }
+    }
+  }
+  if (allDone){
+    deleteAggregateESETrigger();
+  }
+  Logger.log('Data aggregation complete.');
+}
+
+
+// Helper function to get the last row in a column
+function getLastRowInColumn(sheet, columnLetter) {
+  var maxRow = sheet.getMaxRows();
+  var lastDataCell = sheet.getRange(columnLetter + maxRow).getNextDataCell(SpreadsheetApp.Direction.UP);
+  return lastDataCell.getRow();
+}
+
+
+
+
+function aggregateESE(){
+
+
+
+  //createESETrackingSheet();
+  //createESEAggregateSheet();
+  var trackingSheet = ss.getSheetByName('ESE Tracking Sheet');
+  var aggregateSheet = ss.getSheetByName('ESE Aggregate Sheet');
+
+  /*
+  var trackingSheet = ss.getSheetByName('ESE Tracking Sheet');
+  if (!trackingSheet) {
+    var trackingSheet = createESETrackingSheet();
+  }
+  
+  var aggregateSheet = ss.getSheetByName('ESE Aggregate Sheet');
+  if (!aggregateSheet) {
+    var aggregateSheet = createESEAggregateSheet();
+  }
+  */
+  
+  aggregateESEData(trackingSheet, aggregateSheet);
+
+}
+
+
+function createESETrackingSheet(){
+  // Create and setup Tracking Sheet (Sheet 2)
+  //var trackingSheet = ss.insertSheet('ESE Tracking Sheet');
+
+  var trackingSheet = ss.getSheetByName('ESE Tracking Sheet');
+
+  // Insert 'Tracking Sheet' if it doesn't already exist
+  if (!trackingSheet) {
+    trackingSheet = ss.insertSheet('ESE Tracking Sheet');
+  }
+
+  var eseSheetName = setSheetNames().eseSheetName
+  Logger.log(DriveApp.getFilesByName(eseSheetName).next().getName())
+
+  trackingSheet.getRange(1, 1, 1, 13).setValues([["Programme Short Name", "Paper Code", "Paper Title", "Paper Type", "Semester", "teacher_name", "teacher_email", "ESE Max", "Date of Exam", "Due Date", "Marks File Url", "Completed", "Fetched"]]);
+
+  // Loop through each Google Sheet name in eseSheetName array
+  for (var i = 0; i < eseSheetName.length; i++) {
+    var file = DriveApp.getFilesByName(eseSheetName).next();
+
+    //var file = DriveApp.getFilesByName(eseSheetName).next();
+    //var sheet = SpreadsheetApp.open(file).getSheetByName(markSheetName);
+    var sheet = SpreadsheetApp.open(file).getSheetByName('Sheet1');
+
+    
+    // Get the last row with data in the specific Google Sheet
+    var lastRow = getLastRowInColumn(sheet, 'A'); // Assuming data starts from column A
+    var data = sheet.getRange(2, 1, lastRow - 1, 11).getValues(); 
+
+    // Append data to the Tracking Sheet (Sheet 2)
+    trackingSheet.getRange(2, 1, data.length, data[0].length).setValues(data);
+    //var marksUrlCol = 11
+    //var marksUrlPosition = 9
+    //var marksUrl = sheet.getRange(2, marksUrlCol, lastRow - 1, 1).getValues(); // Fetch data from columns A to I
+    //trackingSheet.getRange(2, marksUrlPosition, marksUrl.length, marksUrl[0].length).setValues(marksUrl);
+  }
+
+  return trackingSheet
+
+}
+
+
+function createESEAggregateSheet(){
+  // Define headers for the aggregateSheet
+  var aggregateSheet = ss.getSheetByName('ESE Aggregate Sheet');
+  if (!aggregateSheet) {
+    aggregateSheet = ss.insertSheet('ESE Aggregate Sheet');
+  }
+
+  var headers = ['Regd. No.', 'Course Code', 'ESE Marks', 'ESE Percent', 'ESE Num. Points', 'Programme', 'Semester', 'Teacher', 'Remarks'];
+  aggregateSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  return aggregateSheet
+
+}
+
+
+// Helper function to get the last row in a column
+function getLastRowInColumn(sheet, columnLetter) {
+  var maxRow = sheet.getMaxRows();
+  var lastDataCell = sheet.getRange(columnLetter + maxRow).getNextDataCell(SpreadsheetApp.Direction.UP);
+  return lastDataCell.getRow();
+}
+
+
+
+function setExamDates() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheetName = sheet.getName();
+  
+  // Extract examName (after the '-')
+  var examName = sheetName.split(' - ')[1];
+
+  if (!examName) {
+    Logger.log("Error: Could not extract examName.");
+    return;
+  }
+
+  // Set global variables
+  var cieExamDate = examName;
+  var eseExamDate = examName;
+
+  //Logger.log("CIE Exam Date: " + cieExamDate);
+  //Logger.log("ESE Exam Date: " + eseExamDate);
+
+  return { cieExamDate, eseExamDate };
+}
+
+
+function setSheetNames() {
+  var examDates = setExamDates(); // Call the first function to get examName
+  var examName = examDates.cieExamDate; // Both variables hold the same value
+
+  /*
+  var cieSheetNames = [
+    `Course_Master-${examName}-ATP`,
+    `Course_Master-${examName}-BRN`,
+    `Course_Master-${examName}-NDG`,
+    `Course_Master-${examName}-PSN`
+  ];
+  */
+
+  var eseSheetName = [`Course_Master-${examName}-ESE`]; // Array with one element
+
+  //Logger.log("CIE Sheet Names: " + cieSheetNames.join(", "));
+  //Logger.log("ESE Sheet Name: " + eseSheetName[0]);
+
+  return {eseSheetName };
+}
+
+
+
+function trackESECompletionStatus() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  //const cieSheet = ss.getSheetByName('CIE Tracking Sheet');
+  const eseSheet = ss.getSheetByName('ESE Tracking Sheet');
+
+  if (!eseSheet) {
+    throw new Error('One or more sheets not found. Please check the sheet names.');
+  }
+
+  // Create or get the "Completion Status" sheet
+  let outputSheet = ss.getSheetByName('Completion Status');
+  if (!outputSheet) {
+    outputSheet = ss.insertSheet('Completion Status');
+  }
+
+  // Read data
+  //const cieData = cieSheet.getDataRange().getValues();
+  const eseData = eseSheet.getDataRange().getValues();
+
+  // Header indexes
+  const programmeCol = 0; // A
+  const semesterCol = 4;  // E from CIE Tracking Sheet
+  const fetchedCol = 12;  // M (Done)
+
+  // Build set of Programme Short Names
+  const programmeSet = new Set();
+
+  for (let i = 1; i < eseData.length; i++) {
+    programmeSet.add(eseData[i][programmeCol]);
+  }
+
+  const programmeList = Array.from(programmeSet).sort();
+
+  // Output header with Semester as 2nd column
+  const output = [
+    ['Programme Short Name', 'Semester', 'Num ESE Expected', 'Actual ESE', 'Completion Status']
+  ];
+
+  programmeList.forEach(prog => {
+
+    // Get Semester from CIE Tracking Sheet
+    const semRow = eseData.find((row, idx) => idx > 0 && row[programmeCol] === prog);
+    const semester = semRow ? semRow[semesterCol] : '';
+
+    // Count ESE expected/actual
+    const eseExpected = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const eseActual   = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    let status = 'Pending';
+    if (eseExpected === eseActual) {
+      status = 'Completed';
+    }
+
+    // Insert semester as 2nd column
+    output.push([prog, semester, eseExpected, eseActual, status]);
+  });
+
+  // Write output
+  outputSheet.clear();
+  outputSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+
+function trackESECompletionStatus2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  //const cieSheet = ss.getSheetByName('CIE Tracking Sheet');
+  const eseSheet = ss.getSheetByName('ESE Tracking Sheet');
+
+  if (!eseSheet) {
+    throw new Error('One or more sheets not found. Please check the sheet names.');
+  }
+
+  // Create or get the "Completion Status" sheet
+  let outputSheet = ss.getSheetByName('Completion Status');
+  if (!outputSheet) {
+    outputSheet = ss.insertSheet('Completion Status');
+  }
+
+  // Read data
+  //const cieData = cieSheet.getDataRange().getValues();
+  const eseData = eseSheet.getDataRange().getValues();
+
+  // Header indexes (assuming headers are in Row 1)
+  const programmeCol = 0; // A
+  const fetchedCol = 12;  // K
+
+  // Build set of all Programme Short Names
+  const programmeSet = new Set();
+
+  //for (let i = 1; i < cieData.length; i++) {
+  //  programmeSet.add(cieData[i][programmeCol]);
+  //}
+
+  for (let i = 1; i < eseData.length; i++) {
+    programmeSet.add(eseData[i][programmeCol]);
+  }
+
+  const programmeList = Array.from(programmeSet).sort();
+
+  // Build data
+  const output = [
+    ['Programme Short Name', 'Num ESE Expected', 'Actual ESE','Completion Status']
+  ];
+
+  programmeList.forEach(prog => {
+    //const cieExpected = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    //const cieActual = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    const eseExpected = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const eseActual = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    let status = 'Pending';
+    if (eseExpected === eseActual ){ // && cieExpected === cieActual) {
+      status = 'Completed';
+    }
+
+    output.push([prog, eseExpected, eseActual, status]); //, cieExpected, cieActual, status]);
+  });
+
+  // Write to Completion Status sheet
+  outputSheet.clear();
+  outputSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+
+
+
+function trackCompletionStatus1() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  const cieSheet = ss.getSheetByName('CIE Tracking Sheet');
+  const eseSheet = ss.getSheetByName('ESE Tracking Sheet');
+  const outputSheet = ss.getSheetByName('Sheet1');
+
+  if (!cieSheet || !eseSheet || !outputSheet) {
+    throw new Error('One or more sheets not found. Please check the sheet names.');
+  }
+
+  // Read data
+  const cieData = cieSheet.getDataRange().getValues();
+  const eseData = eseSheet.getDataRange().getValues();
+
+  // Header indexes (assuming headers are in Row 1)
+  const programmeCol = 0; // A
+  const fetchedCol = 10;  // K
+
+  // Build set of all Programme Short Names
+  const programmeSet = new Set();
+
+  for (let i = 1; i < cieData.length; i++) {
+    programmeSet.add(cieData[i][programmeCol]);
+  }
+  for (let i = 1; i < eseData.length; i++) {
+    programmeSet.add(eseData[i][programmeCol]);
+  }
+
+  const programmeList = Array.from(programmeSet).sort();
+
+  // Build data
+  const output = [['Programme Short Name', 'Num CIE Expected', 'Actual CIE', 'Num ESE Expected', 'Actual ESE', 'Completion Status']];
+
+  programmeList.forEach(prog => {
+    const cieExpected = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const cieActual = cieData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    const eseExpected = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog).length;
+    const eseActual = eseData.filter((row, idx) => idx > 0 && row[programmeCol] === prog && row[fetchedCol] === 'Done').length;
+
+    let status = 'Pending';
+    if (cieExpected === cieActual && eseExpected === eseActual) {
+      status = 'Completed';
+    }
+
+    output.push([prog, cieExpected, cieActual, eseExpected, eseActual, status]);
+  });
+
+  // Write to Sheet1
+  outputSheet.clear();
+  outputSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+}
+
+
+function updateMalpracticeInESEAggregate() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const aggSheet = ss.getSheetByName("ESE Aggregate Sheet");
+  const mpSheet = ss.getSheetByName("Malpractice");
+
+  if (!aggSheet || !mpSheet) {
+    throw new Error("Required sheet(s) not found.");
+  }
+
+  // Read data
+  const aggData = aggSheet.getDataRange().getValues();
+  const mpData = mpSheet.getDataRange().getValues();
+
+  // Header rows
+  const aggHeader = aggData[0];
+  const mpHeader = mpData[0];
+
+  // Aggregate Sheet column indices
+  const aggRegdCol = aggHeader.indexOf("Regd. No.");
+  const aggCourseCol = aggHeader.indexOf("Course Code");
+  const aggMarksCol = aggHeader.indexOf("ESE Marks");
+  const aggPercentCol = aggHeader.indexOf("ESE Percent");
+  const aggPointsCol = aggHeader.indexOf("ESE Num. Points");
+  const aggRemarksCol = aggHeader.indexOf("Remarks");
+
+  // Malpractice Sheet column indices
+  const mpRegdCol = mpHeader.indexOf("Regd. No.");
+  const mpMarksCol = mpHeader.indexOf("ESE Marks");
+  const mpPercentCol = mpHeader.indexOf("ESE Percent");
+  const mpPointsCol = mpHeader.indexOf("ESE Num. Points");
+
+  // Create lookup: Regd. No. -> malpractice values
+  const mpMap = new Map();
+
+  for (let i = 1; i < mpData.length; i++) {
+    const regdNo = String(mpData[i][mpRegdCol]).trim();
+    if (!regdNo) continue;
+
+    mpMap.set(regdNo, {
+      marks: mpData[i][mpMarksCol],
+      percent: mpData[i][mpPercentCol],
+      points: mpData[i][mpPointsCol]
+    });
+  }
+
+  const red = "#ea9999";
+
+  // Update Aggregate Sheet
+  for (let i = 1; i < aggData.length; i++) {
+    const regdNo = String(aggData[i][aggRegdCol]).trim();
+
+    if (!mpMap.has(regdNo)) continue;
+
+    const mp = mpMap.get(regdNo);
+
+    // Update values
+    aggData[i][aggMarksCol] = mp.marks;
+    aggData[i][aggPercentCol] = mp.percent;
+    aggData[i][aggPointsCol] = mp.points;
+    aggData[i][aggRemarksCol] = "Malpractice";
+
+    // Write updated row
+    aggSheet.getRange(i + 1, 1, 1, aggHeader.length).setValues([aggData[i]]);
+
+    // Color entire row
+    aggSheet
+      .getRange(i + 1, 1, 1, aggHeader.length)
+      .setBackground(red);
+
+    Logger.log(
+      "Row %s | Regd. No.: %s | Course Code: %s | row made red",
+      i + 1,
+      regdNo,
+      aggData[i][aggCourseCol]
+    );
+  }
+
+  Logger.log("Completed updating malpractice records.");
+}

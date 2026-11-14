@@ -21,36 +21,64 @@ Instead of the Fetch CIE / Fetch ESE Apps Scripts and their Tracking and Aggrega
 1. On **Mark sheets**, link the CIE course masters (one per campus; the campus is taken from the end of the file name, e.g. `Course_Master-Apr 2026-PSN`) and the ESE course master. The course masters are only read, never changed.
 2. **Refresh list from course masters** builds the list of sheets from each row's *Marks File Url* (the old Tracking Sheet).
 3. **Fetch marks now** opens each Marks Statement and takes the marks once the teacher has certified it: CIE needs `certifyCell` and `allFilledCell` = Yes; ESE also needs `validationCell` = Yes. Internship papers (code with `-INT` at characters 5–8) are taken row by row as rows are marked ready. The same named cells as the Apps Script template are used, so the template needs no change.
-4. Results are recomputed when marks changed. Every morning the daily job checks all sheets again; a mark a teacher changes after it was fetched is recorded as a correction (teachers' files are not locked).
+4. Compute results after marks change (the page does it after a Fetch; the morning check only marks that marks changed). **Fetch** reads only sheets not fetched yet (new, still filling, reopened, partly fetched or with a problem) and skips those already fetched. Every morning the daily job checks all sheets again, fetched ones included, so a mark a teacher changes after it was fetched is still recorded as a correction (teachers' files are not locked).
+
+**SLD students.** A student with a Specific Learning Disability writes a separate paper with its own Marks Statement, whose course code ends in SLD (`UPOL-101_SLD`, `UELL-502-SLD`). Its marks count for the paper itself (UPOL-101), graded out of the SLD sheet's own maximum (from the course master's max column, else the sheet), so 37 out of 60 is 62%. This acts like an "Edit course values" change of the ESE maximum for that student, made automatically at Compute; an edit on the student page still wins. The Grade register remarks "SLD (ESE out of 60)".
+
+**Fetch now (one course).** Each sheet on the Mark sheets page has a **Fetch now** button for operators, for when one course's marks are needed straight away. It reads that one Marks Statement immediately, under the same rules: marks are taken only once the sheet is certified (and validated, for ESE); otherwise only its status is refreshed. An already fetched sheet is read again, so later corrections come in too. If any mark changed, results are recomputed. Each use is recorded under Sources and fetches and in the audit log.
 
 A session takes CIE (or ESE) marks either from Mark sheets or from an aggregate sheet / upload, not both. Statuses shown per sheet: Not checked yet, Teacher still filling, Awaiting validation, Partly fetched, Fetched, Reopened by teacher, No access, Template problem, Data missing, No file in course master. Malpractice changes are made as mark edits on the student page.
+
+## Failures
+
+The **Failures** tab (under Release) lists every failed or absent paper in the latest Compute, grouped by batch:
+
+- **Each row:** the student, the paper, its CIE, ESE and COMB marks, where it was lost (Failed in CIE / ESE / both, on the combined mark, or Absent in CIE / ESE) and the student's status.
+- **Who is included:** students whose result is still pending are listed too, because a paper they failed has its marks.
+- **Filters:** programme, campus, semester, paper, failed or absent, status and search.
+- **CSV download:** one row per paper.
+
+Nothing is stored: the list is read from the latest results, and the database picks out the failed papers so the request stays inside the free plan's CPU limit.
+
+## Gracing
+
+The **Gracing** tab (under Release) lists every paper graced in the latest Compute, grouped by batch:
+
+- **Each row:** the student, the paper, CIE, the ESE before and after grace, the kind of grace (ESE or COMB) with the marks added, the COMB % after grace, the student's grace pool (used of pool, and what is left) and their status.
+- **Pool used up:** papers that were close enough to grace but the student's pool could not cover them are listed separately; they stay failed.
+- **Filters:** programme, campus, semester, kind of grace, status and search. **CSV download:** one row per graced paper.
+
+The grace rules are on the Grading rules page.
 
 ## Grade register
 
 Generated automatically from the latest Compute (`engine/src/register.js`), on request, with nothing stored and nothing to upload. It lists only ready results: students with no blocking issues, not held or withheld.
 
-Each student has a name row (Name, Regd. No., Campus, Programme, Semester), a paper table (S.No., Course Code, Course Title, Type, Category, Credits, CIE Marks, ESE Marks, CIE%, ESE%, COMB%, CIE-NP, ESE-NP, COMB-NP, EarnedCred, EarnedCrPoints, Remarks) and totals (Sum of EarnedCred, Sum of EarnedCrPoints, Semester GPA, Letter Grade, Qual Grade). The register goes by programme and semester: students of the same programme and semester are listed together whatever their batch. **Print** prints everyone matching the current programme and search, one A4 landscape page per student, with the institute's header on each page.
+Each student has a name row (Name, Regd. No., Campus, Programme, Semester), a paper table (S.No., Course Code, Course Title, Type, Category, Credits, Weightage (CIE/ESE), CIE Marks, ESE Marks, CIE%, ESE%, COMB%, CIE-NP, ESE-NP, COMB-NP, EarnedCred, EarnedCrPoints, Remarks) and totals (Sum of EarnedCred, Sum of EarnedCrPoints, Semester GPA, Letter Grade, Qual Grade). The register goes by programme and semester: students of the same programme and semester are listed together whatever their batch. **Print** prints everyone matching the current programme and search, one A4 landscape page per student, with the institute's header on each page.
 
 - **Find students** takes several Regd Nos or names at once, separated by commas (Regd Nos also by spaces), and shows them together. It says which of them has no ready result.
 - Papers are in CMF Sequence order, then course code. Gracing uses the same order.
 - A paper's credits and credit points are earned only when it is passed.
+- Weightage is the CIE/ESE split the paper was graded with at the latest Compute (e.g. 25/75, 100/0 for CIE-only): an edit on the student's page, else the CMF's CIE WTG / ESE WTG, else the course's weightage category.
 - A graced paper shows its graced ESE marks and a "Graced +N" remark.
 - Courses with no CIE or ESE (non-credit) are listed for the student's programme, semester and batch, with `--` in the mark columns.
-
-## Result Sheet and Failure List
-
-Port of `Result software.py` without its GUI. Both are built from the latest Compute (ready results only), with **Print** and **Download Word**. Each document has one section per degree, semester and campus; a filter narrows it to a campus, degree, semester, programme or named students.
-
-- **Result Sheet** (A4 portrait): S.No., Regd.No., Name, GPA, Grade, grouped by programme name. A student with a failed paper prints `**Fails**` in place of GPA and Grade, plus `**Absent**` if a paper was missed, with each such paper listed beneath.
-- **Failure List** (A4 landscape): a row per paper that Fails or is Absent, showing CIE, ESE and COMB percentages like the old FailureList sheet, followed by the Paper Taught / QP Setter / Examiner table and the Previous University / Previous CGPA table.
-- **Editable on the page:** those two tables, saved per session. Paper Taught starts from the CIE mark sheet's teacher and Examiner from the ESE mark sheet's; an edit replaces it. Marks are corrected on the student page.
-- **Programme name and degree** come from the CMF (`Programme Name`, `Degree`), with the SMF filling in programmes the CMF does not list. A CMF loaded before this feature must be uploaded again for names to appear; until then the programme code shows.
-- **Campus** comes from the SMF, not worked out from the Regd No as the Python did.
 
 ## Analytics and Integral Items
 
 - **Analytics** (per session): pass rate, grade distribution, GPA histogram and spread per programme and batch, per-course pass rates and mean CIE/ESE/COMB, and the hardest papers. Each cycle has an overview page comparing its sessions; combined figures count regular sessions only.
 - **Integral Items** (per session): port of `populateIntegralItems`. Upload the "Integral Items-Data Entry" workbooks (the **Consolidated** tab of each is read) or link the sheets and sync. Same rules as the sheet, including a blank, text or 0 item becoming `X`. Download as `integral.csv`. It is a report only and does not affect GPA.
+
+## Who can open which tab
+
+**By invitation only.** Only people listed on the People page can sign in. Anyone else, even with an institute account, sees "You have not been given access" and is not added to the list. The admin addresses in `ADMIN_EMAILS` are added as admins at their first sign-in.
+
+On the **People** page an admin chooses, per person, either **every tab** (the default) or **only some tabs**: Data sources, Mark sheets, Integral Items, Batches, Completeness, Issues, Analytics, Final output, Failures, Gracing, Grade register, Runs and audit, Grading rules, and Student pages (the student search and each student's page).
+
+- **Role and tabs together:** the role (viewer, operator, admin) still decides what a person can do. The tabs decide where they can go.
+- **Admins** always see every tab.
+- **The menu** shows only a person's own tabs. Any other tab's address shows a "no access" page, and the server refuses that tab's data too (`shared/tabs.js`, checked in `api/sessions/[sid]/_middleware.js`).
+- **Someone without Batches** starts on their first tab, and the session summary they receive carries no batch list.
+- **Remove access:** each person also has **Remove access**, which shuts them out at once and keeps them out at every sign-in (migration 0022). Removed people are listed under **Access removed**, where **Restore access** gives back their role and tabs. Admins cannot remove themselves. Both actions are recorded in the audit log.
 
 ## How results move
 
@@ -58,11 +86,13 @@ Each Programme × Semester × Batch is a batch. Students in a batch move indepen
 
 | Status | Meaning |
 |---|---|
-| Held | A blocking issue (missing mark, unreadable mark, unknown paper…) — see Issues |
+| Pending | Not finished yet: a blocking issue (missing mark, marks still to come, unreadable mark, unknown paper…) — see Issues. Stored as "Held". |
 | Withheld | Credits do not match SMF Sem-Credits |
 | Ready | Computed with no blocking issue, waiting for approval |
 | Approved | Signed off by an admin — the final step; there is no separate publishing |
 | Changed since approval | Marks or rules changed after approval — needs approval again |
+
+**Campuses.** When a programme is taught on more than one campus, the Batches board shows each campus under its batch. A campus is listed as **ready** once every one of its students is ready (or withheld). Otherwise it shows how many are pending and how much of its marks have arrived. The **Campus ready** filter lists batches where one campus is ready while another is still pending, and Completeness names the ready campus too. A campus's students can be approved without waiting for the other campus.
 
 Every sync records corrected marks, every compute is a stored run you can compare with the previous one, and every override needs a reason and appears in the audit trail.
 
@@ -85,8 +115,8 @@ Every graced paper is listed under Issues, Notes, Grace applied. A borderline pa
 - An unreadable mark holds the student. A mark above the CMF maximum is only a warning and is graded as given (as in the old Rule 3B).
 - Only the incomplete students are held; the rest of the batch can be approved.
 - CIE/ESE weighting comes from the CMF `CIE WTG` / `ESE WTG` columns per course (B.Ed is 30/70).
-- An `_IHA` row in the CMF (a SWAYAM paper's in-house assignment) adds its credits to the paper of the same code, once even when programmes share the paper, and that paper is graded on its one set of marks. The sheet dropped these credits, which left students short of their Sem-Credits. A CMF loaded before this rule must be uploaded again.
-- Each student's expected papers come from the CMF. A course nobody in the batch has marks for blocks the batch; a course only some students have marks for is a warning and nobody is held for it (as in the old Rule 1B). The low-mark warning (20% of the maximum) can be changed per session under **Grading rules → Completeness rules**.
+- An `_IHA` row in the CMF (a SWAYAM paper's in-house assignment) adds its credits to the paper of the same code, once even when programmes share the paper, and that paper is graded on its one set of marks. When that paper is CIE-only (no ESE), the `_IHA` CIE maximum is added as well, once: `UCES-001(ugc26_ge10)` is 50 + 50, so its CIE is out of 100. A paper with an ESE, such as a SWAYAM portal exam at CIE 25 / ESE 75, keeps its own maximums. The sheet dropped these credits, which left students short of their Sem-Credits. A CMF loaded before this rule must be uploaded again.
+- Each student's expected papers come from the CMF. A course nobody in the batch has marks for ("Course not received") holds only the students who may need it: a student whose credits already match their SMF Sem-Credits and who has no issue of their own goes ahead, so one campus can be released while another waits for a course. The batch is blocked only when that holds everyone; a course only some students have marks for is a warning and nobody is held for it (as in the old Rule 1B). The low-mark warning (20% of the maximum) can be changed per session under **Grading rules → Completeness rules**.
 - **Completeness** shows the old completeness report section by section (Rule 0 to detained students). Unlike the old script, a hard block holds only the students it affects, or the whole batch when the problem is with the batch.
 - Hand-typed values in the sheet become explicit overrides. On a student's page an admin can click a CIE or ESE mark, a student detail (name, campus, batch, Sem-Credits) or **Edit course values** to change it. Each edit needs a reason, is kept in the audit trail with the sheet's value, stays in force after the next sync, and recomputes the result; **Revert to sheet** undoes it.
 
@@ -99,8 +129,14 @@ Every graced paper is listed under Issues, Notes, Grace applied. A borderline pa
 The free plan allows 100,000 rows written and 5 million rows read a day, resetting at 5:30 am IST. Past that, saving fails until the reset and the API says so.
 
 - **Write only what changed:** marks, CIE / ESE tab rows, issues, batches and the mark sheet list are compared with what is stored first.
-- **A Compute that changes nothing saves nothing:** the latest run stands and the page says nothing changed. A Compute that changes anything saves every student again (about 3,300 rows written for 1,600 students).
+- **A Compute that changes nothing saves nothing:** the latest run stands and the page says nothing changed. A Compute that changes anything still grades everyone, because the completeness checks come from grading, and stores a full new run. It sends only the students whose result changed. Each result carries a fingerprint (`row_hash`, migration 0020), and the database copies the unchanged ones from the latest run (`calc/carry`). So after one course's marks come in, saving takes a few requests instead of about 80. The rows written are the same as before: about 3,300 for 1,600 students.
 - **Avoid counting or scanning big tables on page loads,** and check what a one-off query costs before running it on live: a query scanning `marksheets` for each paper read over 600,000 rows.
+- **The CIE / ESE marks list reads less.** It used to read all of a component's rows (about 12,000 for CIE) five times on every load, page change and refresh during a fetch, about 4 million rows a day. Now:
+  - the filter lists come from one query;
+  - page changes ask for the rows only (`lite=1`) and keep page 1's total and lists;
+  - an index (migration 0023) lets a page read only up to its own rows;
+  - during a fetch, the list reloads at most once a minute.
+- **When the limit is reached, pages still show data.** Each page read is kept as a copy in the browser (IndexedDB, `src/lib/offline.js`). When the database refuses (`503` with `details.dbLimit`) or the server can't be reached, the page shows the last copy, with a red banner saying when it was saved. Pages never opened in that browser can't be shown, and nothing can be saved. Compute's paged reads and CSV downloads are never copied. Signing out deletes the copies.
 - **Check usage** with `npx wrangler d1 info result-processor` and `npx wrangler d1 insights result-processor --sort-by=writes --sort-type=sum --timePeriod=1d`.
 
 ## Tests
@@ -158,9 +194,9 @@ For frontend work run `npm run dev` alongside `wrangler pages dev` and open http
    npx wrangler secret put GOOGLE_SA_KEY   --config cron/wrangler.toml
    npx wrangler deploy --config cron/wrangler.toml
    ```
-   It runs every 10 minutes between 05:30 and 08:20 IST and checks each open session's sheets once a day.
+   It runs every minute between 05:30 and 15:30 IST, 2 sheets a run (the free plan's 10 ms of CPU), and checks each open session's sheets once a day. It only fetches; Compute runs in the browser.
 
-A full-session compute of ~1,600 students takes about 1–2 seconds of CPU, so use the Workers Paid plan (the free plan's 10 ms CPU limit is too small).
+**Cloudflare's free plan** allows each request only 10 ms of CPU, and grading ~1,600 students takes 1–2 seconds. So **Compute runs in the browser** (`src/lib/compute.js`): it downloads what grading needs in pages (`/calc/inputs`), grades with the same code the server uses (`shared/compute-core.js`), and saves the results back in small pieces (`/calc/start`, `results`, `batches`, `exceptions`, `finish`). A Compute that changes nothing is recognised by a fingerprint of all results and saves nothing. Completeness' **Check now** grades in the browser the same way and saves nothing. The daily job only fetches marks; the portal shows that marks changed until someone clicks Compute results. Keep each request's work small: the server's `POST /compute` (everything in one request) is only for a local server without the limit.
 
 ## Not yet covered
 

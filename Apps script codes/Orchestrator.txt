@@ -1,0 +1,1041 @@
+/**
+ * Orchestrator.gs - Main Sync Controller
+ * Coordinates all phases of data processing
+ */
+
+//Menu Setup
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+ 
+  ui.createMenu("🔄 Sync")
+    .addItem("▶ Run Full Sync",        "runFullSync")
+    .addItem("▶ Run Incremental Sync", "runIncrementalSync")
+    .addSeparator()
+    .addSubMenu(ui.createMenu("⚙ Run Individual Phases")
+      .addItem("Phase 3 Only — Consolidated Result",           "runPhase3Only")
+      .addItem("Phase 4+5 Only — Final Output + Failure List", "runFinalOutputAndFailureList")
+      .addItem("Phase 6-Digilocker Sheet", "populateDigiLockerSheet")
+      .addItem("Phase 7 — CGPA Engine",      "runCGPAEngine")
+    )
+    .addSeparator()
+
+    .addSubMenu(ui.createMenu("📋 Reference Data")
+    .addItem("Step 1 — Populate Paper Code Table", "populatePaperCodeTable")
+    .addItem("Step 2 — Populate Programs Table",   "populateProgramsTable")
+    .addItem("Step 3 — Populate Stage1 Working",   "populateStage1Working")
+    .addItem("Step 4 — Populate Academic Year",    "populateAcademicYear")
+    .addSeparator()
+    .addItem("Run All Steps in Order",             "populateAllReferenceData")
+  )
+    .addSubMenu(ui.createMenu("✅ Completeness")
+      .addItem("Run Completeness Check",       "runCompletenessCheckOnly")
+      .addItem("View Completeness Report",     "openCompletenessReport")
+      .addItem("View Pending Results",         "openPendingResults")
+      .addItem("View Left Students",           "openLeftStudents")
+      .addItem("Open Validation Overrides",    "openValidationOverrides")      // ← NEW
+      .addItem("Create Overrides Sheet",       "createValidationOverridesSheet") // ← NEW
+      
+    )
+    .addSeparator()
+    .addSubMenu(ui.createMenu("🧪 Tests")
+      .addItem("Test Config Getters", "testConfigGetters")
+      .addItem("Test Academic Year",  "testPopulateAcademicYear")
+      .addItem("Test Data Fetch",     "testFetchAssessmentData")
+    )
+    .addSubMenu(ui.createMenu("⏰ Trigger Management")
+      .addItem("Create Daily 7 AM Trigger", "createDailyTrigger")
+      .addItem("Delete Daily Trigger",      "deleteDailyTrigger")
+      .addItem("List All Triggers",         "listAllTriggers")
+    )
+    .addSubMenu(ui.createMenu("🧹 Maintenance")
+      .addItem("Trim Logs Sheet",       "trimLogsSheet")
+      .addItem("Fix Sync Status Sheet", "fixSyncStatusSheet")
+      .addItem("Print All Config",      "printAllConfig")
+      .addItem("Clear Consolidated Result A–F", "clearConsolidatedResultData")
+      .addItem("Clear Final Output",            "clearFinalOutputData")
+    )
+    .addToUi();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MAIN SYNC FUNCTION - THIS IS YOUR ENTRY POINT
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Main sync function - Run this to process everything
+ * Can be called manually or via trigger
+ * @param {string} syncMode - "FULL" or "INCREMENTAL" (default: "INCREMENTAL")
+ */
+function runSync(syncMode) {
+  try {
+    const mode = syncMode || "INCREMENTAL";
+ 
+    Logger.log("\n════════════════════════════════════════════════════════════");
+    Logger.log("STARTING SYNC - MODE: " + mode);
+    Logger.log("════════════════════════════════════════════════════════════\n");
+ 
+    const overallStartTime = Date.now();
+ 
+    // ── Phase 1: Academic Year ───────────────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 1: ACADEMIC YEAR ═══", "ℹ");
+ 
+    const academicYearResult = populateAcademicYear();
+    if (!academicYearResult.success) throw new Error("Phase 1 failed: Academic Year population");
+ 
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 1 completed: " + academicYearResult.studentRecords + " student records", "✓");
+ 
+    // ── Phase 2: Fetch Assessment Data ───────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 2: FETCH ASSESSMENT DATA ═══", "ℹ");
+ 
+    const fetchResult = fetchAssessmentData("ALL");
+    if (!fetchResult.success) throw new Error("Phase 2 failed: Assessment data fetch");
+ 
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 2 completed: " + fetchResult.eligibleCount + " eligible records" +
+      " (" + fetchResult.blockedCount + " blocked)", "✓");
+ 
+    // Warn if any programmes are blocked
+    if (fetchResult.blockedCount > 0) {
+      logEvent("ORCHESTRATOR", "0",
+        "⚠ " + Object.keys(fetchResult.validation.blockedProgrammes).length +
+        " programme(s) blocked — see _CompletenessReport and _PendingResults", "⚠");
+    }
+ 
+    // ── Phase 3: Consolidated Result ─────────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 3: CONSOLIDATED RESULT ═══", "ℹ");
+ 
+    let populateResult;
+ 
+    if (mode === "FULL") {
+      logEvent("ORCHESTRATOR", "0", "Running FULL sync...", "ℹ");
+      // ▼ CHANGED: use eligibleData, not mergedData
+      populateResult = populateConsolidatedResultFull(fetchResult.eligibleData);
+ 
+    } else {
+      logEvent("ORCHESTRATOR", "0", "Running INCREMENTAL sync...", "ℹ");
+      const existingRecordsHash = loadExistingRecords();
+      // ▼ CHANGED: use eligibleData, not mergedData
+      populateResult = populateConsolidatedResult(existingRecordsHash, fetchResult.eligibleData);
+    }
+ 
+    if (!populateResult.success) throw new Error("Phase 3 failed: Consolidated Result population");
+ 
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 3 completed: " +
+      (mode === "FULL" ? populateResult.recordsAdded : populateResult.newRecordsAdded) +
+      " records populated", "✓");
+ 
+    // ── Phase 4: Final Output ────────────────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 4: FINAL OUTPUT ═══", "ℹ");
+ 
+    const finalOutputResult = populateFinalOutput();
+    if (!finalOutputResult.success) throw new Error("Phase 4 failed: Final Output population");
+ 
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 4 completed: " + finalOutputResult.recordsPopulated + " records", "✓");
+ 
+    // ── Phase 5: Failure List ────────────────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 5: FAILURE LIST ═══", "ℹ");
+ 
+    let failureListResult;
+ 
+    if (mode === "FULL") {
+      const allRecordKeys = populateResult.recordKeys || [];
+      failureListResult = populateFailureList(allRecordKeys);
+    } else {
+      failureListResult = populateFailureList(populateResult.newRecordsKeys);
+    }
+ 
+    if (!failureListResult.success) throw new Error("Phase 5 failed: Failure List population");
+
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 5 completed: " + failureListResult.recordsPopulated + " failure records", "✓");
+
+    // ── Phase 6: CGPA Engine ─────────────────────────────────────────────
+    logEvent("ORCHESTRATOR", "0", "═══ PHASE 6: CGPA ENGINE ═══", "ℹ");
+
+    const cgpaResult = runCGPAEngine();
+
+    logEvent("ORCHESTRATOR", "0",
+      "Phase 6 completed: CGPA Result sheet written", "✓");
+
+    // ── Update sync metadata ─────────────────────────────────────────────
+    updateLastSyncTimestamp();
+    updateLastSyncCount(
+      mode === "FULL" ? populateResult.recordsAdded : populateResult.newRecordsAdded
+    );
+ 
+    // ── Completion summary ───────────────────────────────────────────────
+    const overallDuration = Math.round((Date.now() - overallStartTime) / 1000);
+ 
+    Logger.log("\n════════════════════════════════════════════════════════════");
+    Logger.log("SYNC COMPLETED SUCCESSFULLY");
+    Logger.log("════════════════════════════════════════════════════════════");
+    Logger.log("Mode          : " + mode);
+    Logger.log("Total Duration: " + overallDuration + "s");
+    Logger.log("");
+    Logger.log("Phase 1 (Academic Year) : " + academicYearResult.studentRecords + " records");
+    Logger.log("Phase 2 (Fetch)         : " + fetchResult.eligibleCount + " eligible / " + fetchResult.blockedCount + " blocked");
+    Logger.log("Phase 3 (Consolidated)  : " +
+      (mode === "FULL" ? populateResult.recordsAdded : populateResult.newRecordsAdded) + " records");
+    Logger.log("Phase 4 (Final Output)  : " + finalOutputResult.recordsPopulated + " records");
+    Logger.log("Phase 5 (Failure List)  : " + failureListResult.recordsPopulated + " records");
+    Logger.log("Phase 6 (CGPA Engine)   : CGPA Result sheet written");
+    if (fetchResult.blockedCount > 0) {
+      Logger.log("");
+      Logger.log("⚠ Blocked programmes    : " + Object.keys(fetchResult.validation.blockedProgrammes).length);
+      Logger.log("  See _CompletenessReport and _PendingResults for details");
+    }
+    Logger.log("════════════════════════════════════════════════════════════\n");
+ 
+    logEvent("ORCHESTRATOR", "0", "SYNC COMPLETED: " + overallDuration + "s", "✓");
+ 
+    return {
+      success:  true,
+      mode,
+      duration: overallDuration,
+      phases: {
+        academicYear:       academicYearResult,
+        dataFetch:          fetchResult,
+        consolidatedResult: populateResult,
+        finalOutput:        finalOutputResult,
+        failureList:        failureListResult
+      }
+    };
+ 
+  } catch (error) {
+    Logger.log("\n✗✗✗ SYNC FAILED ✗✗✗");
+    Logger.log("Error: " + error.message);
+    Logger.log("Stack: " + error.stack);
+    logEvent("ERROR", "0", "SYNC FAILED: " + error.message, "✗");
+ 
+    return { success: false, error: error.message };
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// CONVENIENCE FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Run FULL sync - Clears and repopulates everything
+ * Use this for first-time setup or complete refresh
+ */
+function runFullSync() {
+  return runSync("FULL");
+}
+
+/**
+ * Run INCREMENTAL sync - Only adds new records
+ * Use this for regular updates
+ */
+function runIncrementalSync() {
+  return runSync("INCREMENTAL");
+}
+
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// STANDALONE PHASE 3 — Run Consolidated Result only
+// ════════════════════════════════════════════════════════════════════════════
+
+function runPhase3Only() {
+  try {
+    const startTime = new Date();
+ 
+    Logger.log("═════════════════════════════════════════════════════");
+    Logger.log("STARTING PHASE 3 ONLY — Consolidated Result + Final Output");
+    Logger.log("═════════════════════════════════════════════════════");
+ 
+    // ── Step 1: Fetch merged data ────────────────────────────────────────
+    Logger.log("\n--- Step 1: Fetching and Validating Assessment Data ---");
+    const fetchResult = fetchAssessmentData("ALL");
+ 
+    if (!fetchResult.success) {
+      throw new Error("Data fetch failed: " + (fetchResult.error || "Unknown error"));
+    }
+ 
+    Logger.log("✓ Fetched total     : " + fetchResult.totalRecords + " merged records");
+    Logger.log("  CIE records       : " + fetchResult.cieCount);
+    Logger.log("  ESE records       : " + fetchResult.eseCount);
+    Logger.log("  Eligible records  : " + fetchResult.eligibleCount);
+    Logger.log("  Blocked records   : " + fetchResult.blockedCount);
+    Logger.log("  Left students (L) : " + Object.keys(fetchResult.validation.leftStudents).length);
+ 
+    if (fetchResult.blockedCount > 0) {
+      Logger.log("\n  ⚠ Blocked Programmes:");
+      for (const pk in fetchResult.validation.blockedProgrammes) {
+        const [prog, sem] = pk.split("|");
+        Logger.log("    " + prog + " Sem " + sem + " → " +
+          fetchResult.validation.blockedProgrammes[pk].reasons.join(", "));
+      }
+      Logger.log("  See _CompletenessReport for full details.");
+    }
+ 
+    flushLogs();
+ 
+    // ── Step 2: Build existing records hash ──────────────────────────────
+    Logger.log("\n--- Step 2: Loading existing records ---");
+    const existingRecordsHash = buildExistingRecordsHashMap();
+ 
+    // ▼ CHANGED: count new records against eligibleData only
+    const newCount = countNewRecords(fetchResult.eligibleData, existingRecordsHash);
+    Logger.log("✓ Existing records  : " + Object.keys(existingRecordsHash).length);
+    Logger.log("✓ New eligible to add: " + newCount);
+ 
+    if (newCount === 0) {
+      Logger.log("\n⚠ No new eligible records. Skipping to Final Output refresh...");
+      flushLogs();
+ 
+      Logger.log("\n--- Step 4: Populating Final Output ---");
+      const finalOutputResult = populateFinalOutput();
+      Logger.log("✓ Final Output records: " + finalOutputResult.recordsPopulated);
+      flushLogs();
+ 
+      return {
+        success:            true,
+        message:            "No new eligible records — Final Output refreshed",
+        newRecordsAdded:    0,
+        finalOutputRecords: finalOutputResult.recordsPopulated
+      };
+    }
+ 
+    flushLogs();
+ 
+    // ── Step 3: Populate Consolidated Result ─────────────────────────────
+    Logger.log("\n--- Step 3: Populating Consolidated Result ---");
+    // ▼ CHANGED: pass eligibleData, not mergedData
+    const populateResult = populateConsolidatedResult(existingRecordsHash, fetchResult.eligibleData);
+ 
+    if (!populateResult.success) throw new Error("Consolidated Result population failed");
+ 
+    Logger.log("✓ New records added : " + populateResult.newRecordsAdded);
+    Logger.log("  Start row         : " + populateResult.startRow);
+    Logger.log("  End row           : " + populateResult.endRow);
+    flushLogs();
+ 
+    // ── Step 4: Populate Final Output ────────────────────────────────────
+    Logger.log("\n--- Step 4: Populating Final Output ---");
+    const finalOutputResult = populateFinalOutput();
+ 
+    if (!finalOutputResult.success) {
+      Logger.log("⚠ Final Output failed — Consolidated Result was updated successfully");
+    } else {
+      Logger.log("✓ Final Output records: " + finalOutputResult.recordsPopulated);
+    }
+    flushLogs();
+ 
+    // ── Step 5: Update sync metadata ─────────────────────────────────────
+    updateLastSyncTimestamp();
+    updateLastSyncCount(populateResult.newRecordsAdded);
+ 
+    const duration = ((new Date() - startTime) / 1000).toFixed(2);
+ 
+    Logger.log("\n═════════════════════════════════════════════════════");
+    Logger.log("PHASE 3 COMPLETED SUCCESSFULLY");
+    Logger.log("═════════════════════════════════════════════════════");
+    Logger.log("New eligible records added : " + populateResult.newRecordsAdded);
+    Logger.log("Blocked records (held)     : " + fetchResult.blockedCount);
+    Logger.log("Final Output records       : " + finalOutputResult.recordsPopulated);
+    Logger.log("Duration                   : " + duration + "s");
+ 
+    if (fetchResult.blockedCount > 0) {
+      Logger.log("\n⚠ PENDING PROGRAMMES:");
+      Logger.log("  Check _CompletenessReport for blocking reasons.");
+      Logger.log("  Check _PendingResults for students awaiting resolution.");
+    }
+ 
+    Logger.log("\n⚠ NEXT STEPS:");
+    Logger.log("  1. Check column F in Consolidated Result for any 'CHECK' markers");
+    Logger.log("  2. Verify Final Output GPA values look correct");
+    Logger.log("  3. Review _CompletenessReport for any blocked programmes");
+    flushLogs();
+ 
+    return {
+      success:            true,
+      newRecordsAdded:    populateResult.newRecordsAdded,
+      blockedRecords:     fetchResult.blockedCount,
+      finalOutputRecords: finalOutputResult.recordsPopulated,
+      startRow:           populateResult.startRow,
+      endRow:             populateResult.endRow,
+      duration
+    };
+ 
+  } catch (error) {
+    Logger.log("\nPHASE 3 FAILED");
+    Logger.log("ERROR: " + error.message);
+    Logger.log("Stack: " + error.stack);
+    flushLogs();
+ 
+    return { success: false, message: error.message };
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load existing records from Consolidated Result sheet
+ * Creates hash map for fast lookup: key → true
+ * @return {Object} Hash map of existing record keys
+ */
+function loadExistingRecords() {
+  try {
+    logEvent("ORCHESTRATOR", "0", "Loading existing records from Consolidated Result...", "ℹ");
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const consolidatedSheet = ss.getSheetByName(getProcessorSheetName());
+    
+    if (!consolidatedSheet) {
+      return {};
+    }
+    
+    const lastRow = consolidatedSheet.getLastRow();
+    
+    if (lastRow <= 1) {
+      return {};
+    }
+    
+    const data = consolidatedSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    
+    const existingHash = {};
+    
+    for (const row of data) {
+      const regnNo = String(row[0]).trim();
+      const paperCode = String(row[1]).trim();
+      
+      if (regnNo && paperCode) {
+        const key = regnNo + "|" + paperCode;
+        existingHash[key] = true;
+      }
+    }
+    
+    Logger.log("✓ Loaded " + Object.keys(existingHash).length + " existing records");
+    
+    return existingHash;
+    
+  } catch (error) {
+    Logger.log("Error loading existing records: " + error.message);
+    return {};
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TRIGGER MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Create daily 7 AM trigger for Phase 3 Only
+ * Run this ONCE manually to set up the trigger
+ * After that it runs automatically every day at 7 AM
+ */
+function createDailyTrigger() {
+  try {
+    // Delete existing triggers first to avoid duplicates
+    deleteDailyTrigger();
+    
+    // Create new daily trigger at 7 AM
+    ScriptApp.newTrigger("runPhase3Only")
+      .timeBased()
+      .everyDays(1)
+      .atHour(7)
+      .create();
+    
+    Logger.log("✓ Daily trigger created — runPhase3Only() will run every day at 7 AM");
+    SpreadsheetApp.getUi().alert(
+      "Trigger Created",
+      "✓ Daily trigger set up successfully.\n\nrunPhase3Only() will run automatically every morning at 7 AM.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    
+  } catch (error) {
+    Logger.log("ERROR creating trigger: " + error.message);
+    SpreadsheetApp.getUi().alert(
+      "Error",
+      "Failed to create trigger: " + error.message,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  }
+}
+
+/**
+ * Delete all existing daily triggers for runPhase3Only
+ * Run this to stop the automatic daily sync
+ */
+function deleteDailyTrigger() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    let deleted = 0;
+    
+    for (const trigger of triggers) {
+      if (trigger.getHandlerFunction() === "runPhase3Only") {
+        ScriptApp.deleteTrigger(trigger);
+        deleted++;
+      }
+    }
+    
+    if (deleted > 0) {
+      Logger.log("✓ Deleted " + deleted + " existing trigger(s) for runPhase3Only");
+    } else {
+      Logger.log("ℹ No existing triggers found for runPhase3Only");
+    }
+    
+  } catch (error) {
+    Logger.log("ERROR deleting trigger: " + error.message);
+  }
+}
+
+/**
+ * List all active triggers (for debugging)
+ */
+function listAllTriggers() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    
+    Logger.log("\n═══ ACTIVE TRIGGERS ═══");
+    Logger.log("Total triggers: " + triggers.length);
+    
+    if (triggers.length === 0) {
+      Logger.log("No triggers found");
+    } else {
+      for (const trigger of triggers) {
+        Logger.log("─────────────────────");
+        Logger.log("Function:  " + trigger.getHandlerFunction());
+        Logger.log("Type:      " + trigger.getEventType());
+        Logger.log("Source:    " + trigger.getTriggerSource());
+        Logger.log("ID:        " + trigger.getUniqueId());
+      }
+    }
+    
+    Logger.log("═══════════════════════\n");
+    
+  } catch (error) {
+    Logger.log("ERROR listing triggers: " + error.message);
+  }
+}
+
+function diagnoseUADS303() {
+  const regnNo    = "24010114001";
+  const paperCode = "UADS-303";
+  
+  // Check ESE file directly
+  const eseFileId    = getESEFileId();
+  const eseSheetName = getESESheetName();
+  const eseFile      = SpreadsheetApp.openById(eseFileId);
+  const eseSheet     = eseFile.getSheetByName(eseSheetName);
+  const lastRow      = eseSheet.getLastRow();
+  const data         = eseSheet.getRange(2, 1, lastRow - 1, 8).getValues();
+  
+  Logger.log("═══ SEARCHING ESE FILE FOR UADS-303 ═══");
+  
+  let found = false;
+  for (const row of data) {
+    const r = String(row[0]).trim();
+    const p = String(row[2]).trim();
+    
+    // Search by paper code only
+    if (p === paperCode) {
+      Logger.log("FOUND by paper code:");
+      Logger.log("  RegnNo:    [" + r + "]");
+      Logger.log("  PaperCode: [" + p + "]");
+      Logger.log("  Marks:     [" + row[3] + "]");
+      Logger.log("  Programme: [" + row[6] + "]");
+      Logger.log("  Semester:  [" + row[7] + "]");
+      if (r === regnNo) found = true;
+    }
+    
+    // Search by regnNo only
+    if (r === regnNo) {
+      Logger.log("FOUND by regnNo - Paper: [" + p + "] Marks: [" + row[3] + "]");
+    }
+  }
+  
+  if (!found) {
+    Logger.log("⚠ " + regnNo + " + " + paperCode + " NOT found as exact pair in ESE file");
+  }
+  
+  Logger.log("═══ DONE ═══");
+}
+
+
+ 
+function runFinalOutputAndFailureList() {
+  try {
+    Logger.log("═════════════════════════════════════════════════════");
+    Logger.log("RUNNING PHASE 4+5 ONLY — Final Output + Failure List");
+    Logger.log("═════════════════════════════════════════════════════");
+ 
+    const allKeys = getAllRecordKeysFromConsolidatedResult();
+    Logger.log("Keys from Consolidated Result: " + allKeys.length);
+ 
+    const finalOutputResult = populateFinalOutput();
+    Logger.log("✓ Final Output: " + finalOutputResult.recordsPopulated + " records");
+ 
+    const failureListResult = populateFailureList(allKeys);
+    Logger.log("✓ Failure List: " + failureListResult.recordsPopulated + " records");
+
+    // ── Phase 6: CGPA Engine ─────────────────────────────────────────────
+    runCGPAEngine();
+    Logger.log("✓ CGPA Engine: CGPA Result sheet written");
+
+    flushLogs();
+
+    return {
+      success:      true,
+      finalOutput:  finalOutputResult.recordsPopulated,
+      failureList:  failureListResult.recordsPopulated
+    };
+ 
+  } catch (error) {
+    Logger.log("ERROR: " + error.message);
+    flushLogs();
+    return { success: false, message: error.message };
+  }
+}
+
+/**
+ * Run completeness validation only — no pipeline writes.
+ * Generates _CompletenessReport, _LeftStudents, updates _PendingResults.
+ * Safe to call standalone from the menu at any time.
+ */
+function runCompletenessCheckOnly() {
+  try {
+    const startTime = new Date();
+ 
+    Logger.log("═════════════════════════════════════════════════════");
+    Logger.log("STARTING COMPLETENESS CHECK (standalone)");
+    Logger.log("═════════════════════════════════════════════════════");
+ 
+    // ── Step 1: Load Academic Year ────────────────────────────────────────
+    Logger.log("\n--- Step 1: Loading Academic Year ---");
+    const academicYearLookup = _loadAcademicYearLookup();
+ 
+    if (Object.keys(academicYearLookup).length === 0) {
+      SpreadsheetApp.getUi().alert(
+        "Academic Year Empty",
+        "Academic Year sheet has no data.\nRun Phase 1 (Academic Year population) first.",
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+      return { success: false, message: "Academic Year empty" };
+    }
+ 
+    Logger.log("✓ Loaded " + Object.keys(academicYearLookup).length + " student records");
+    flushLogs();
+ 
+    // ── Step 2: Fetch CIE and ESE records ────────────────────────────────
+    Logger.log("\n--- Step 2: Fetching CIE marks ---");
+    const cieRecords = fetchCIEMarks("ALL");
+    Logger.log("✓ CIE records: " + cieRecords.length);
+ 
+    Logger.log("\n--- Step 3: Fetching ESE marks ---");
+    const eseRecords = fetchESEMarks("ALL");
+    Logger.log("✓ ESE records: " + eseRecords.length);
+ 
+    if (cieRecords.length === 0 && eseRecords.length === 0) {
+      SpreadsheetApp.getUi().alert(
+        "No Fetch Data",
+        "Both CIE and ESE fetch files appear to be empty.\nCheck FETCH_CIE_FILE_ID and FETCH_ESE_FILE_ID in _Config.",
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+      return { success: false, message: "No fetch data" };
+    }
+ 
+    flushLogs();
+ 
+    // ── Step 4: Run validation ────────────────────────────────────────────
+    Logger.log("\n--- Step 4: Running completeness validation ---");
+    const validationResult = validateCompleteness(cieRecords, eseRecords, academicYearLookup);
+    flushLogs();
+ 
+    // ── Step 5: Update _PendingResults ────────────────────────────────────
+    Logger.log("\n--- Step 5: Updating _PendingResults ---");
+ 
+    // Merge to get blocked records for pending tracking
+    const mergedArray = mergeCIEAndESEData(cieRecords, eseRecords);
+    const mergedData  = {};
+    for (const r of mergedArray) mergedData[r.key] = r;
+ 
+    const { blockedData } = splitEligibleAndBlocked(
+      mergedData,
+      validationResult.blockedProgrammes,
+      validationResult.leftStudents,
+      academicYearLookup,
+      validationResult.excludedRegnNos,       // ← add
+      validationResult.unknownPaperCodes,     // ← add
+      validationResult.excludedPaperKeys      // ← add
+    );
+ 
+    writePendingResults(validationResult.blockedProgrammes, blockedData, academicYearLookup);
+    retryPendingStudents(mergedData, validationResult.blockedProgrammes, academicYearLookup);
+    flushLogs();
+ 
+    // ── Done ──────────────────────────────────────────────────────────────
+    const duration = ((new Date() - startTime) / 1000).toFixed(2);
+ 
+    Logger.log("\n═════════════════════════════════════════════════════");
+    Logger.log("COMPLETENESS CHECK DONE in " + duration + "s");
+    Logger.log("═════════════════════════════════════════════════════");
+    Logger.log("Eligible programmes : " + validationResult.eligibleProgrammes.size);
+    Logger.log("Blocked programmes  : " + Object.keys(validationResult.blockedProgrammes).length);
+    Logger.log("Left students (L)   : " + Object.keys(validationResult.leftStudents).length);
+    Logger.log("Rule 1 failures     : " + Object.keys(validationResult.rule1.failedProgrammes).length);
+    Logger.log("Rule 2 flagged rows : " + Object.keys(validationResult.rule2.flaggedRows).length);
+    Logger.log("Rule 3A flagged     : " + validationResult.rule3.partA.flaggedCourses.length);
+    Logger.log("Rule 3B flagged     : " + validationResult.rule3.partB.flaggedRows.length);
+    flushLogs();
+ 
+    // Open the report sheet automatically
+    _activateSheet("_CompletenessReport");
+ 
+    // Show summary alert
+    const blockedCount   = Object.keys(validationResult.blockedProgrammes).length;
+    const eligibleCount  = validationResult.eligibleProgrammes.size;
+    const leftCount      = Object.keys(validationResult.leftStudents).length;
+ 
+    const msg =
+      "Completeness check done in " + duration + "s\n\n" +
+      "Eligible programmes : " + eligibleCount + "\n" +
+      "Blocked programmes  : " + blockedCount + "\n" +
+      "Left students (L)   : " + leftCount + "\n\n" +
+      (blockedCount > 0
+        ? "⚠ See _CompletenessReport for details on blocked programmes.\n" +
+          "Blocked students are in _PendingResults."
+        : "✓ All programmes passed — pipeline is clear to run.");
+ 
+    SpreadsheetApp.getUi().alert(
+      blockedCount > 0 ? "⚠ Issues Found" : "✓ All Clear",
+      msg,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+ 
+    return {
+      success:           true,
+      eligibleProgrammes: eligibleCount,
+      blockedProgrammes:  blockedCount,
+      leftStudents:       leftCount,
+      duration
+    };
+ 
+  } catch (error) {
+    Logger.log("\nCOMPLETENESS CHECK FAILED");
+    Logger.log("ERROR: " + error.message);
+    Logger.log("Stack: " + error.stack);
+    flushLogs();
+ 
+    SpreadsheetApp.getUi().alert(
+      "Error",
+      "Completeness check failed:\n\n" + error.message +
+      "\n\nCheck Apps Script logs for the full stack trace.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+ 
+    return { success: false, message: error.message };
+  }
+}
+ 
+ 
+// ════════════════════════════════════════════════════════════════════════════
+// UPDATED openCompletenessReport()
+// Replace the existing one in Orchestrator.gs
+// ════════════════════════════════════════════════════════════════════════════
+ 
+function openCompletenessReport() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("_CompletenessReport");
+ 
+  if (!sheet) {
+    const ui       = SpreadsheetApp.getUi();
+    const response = ui.alert(
+      "Report Not Found",
+      "_CompletenessReport does not exist yet.\n\n" +
+      "Would you like to run the completeness check now?\n" +
+      "(This fetches CIE + ESE data and validates without touching any result sheets.)",
+      ui.ButtonSet.YES_NO
+    );
+ 
+    if (response === ui.Button.YES) {
+      runCompletenessCheckOnly();
+    }
+ 
+    return;
+  }
+ 
+  ss.setActiveSheet(sheet);
+}
+ 
+ 
+
+ 
+// ════════════════════════════════════════════════════════════════════════════
+// SHEET NAVIGATION HELPERS
+// Add these to Orchestrator.gs alongside the above
+// ════════════════════════════════════════════════════════════════════════════
+ 
+function openPendingResults() {
+  _activateSheet("_PendingResults");
+}
+ 
+function openLeftStudents() {
+  _activateSheet("_LeftStudents");
+}
+ 
+/**
+ * Activate a sheet by name — shows alert if it does not exist
+ * @param {string} sheetName
+ */
+function _activateSheet(sheetName) {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+ 
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert(
+      "Not Found",
+      sheetName + " does not exist yet.\nRun a completeness check or sync first.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
+ 
+  ss.setActiveSheet(sheet);
+}
+
+function clearConsolidatedResultData() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    "Clear Consolidated Result",
+    "This will clear all data in columns A–F from row 2 onwards.\n\nFormulas in columns G+ will NOT be touched.\n\nAre you sure?",
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) {
+    ui.alert("Cancelled", "No data was cleared.", ui.ButtonSet.OK);
+    return;
+  }
+
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(getProcessorSheetName());
+
+    if (!sheet) throw new Error("Consolidated Result sheet not found");
+
+    const lastDataRow = _getLastDataRow(sheet);
+
+    if (lastDataRow <= 1) {
+      ui.alert("Nothing to Clear", "Consolidated Result sheet is already empty.", ui.ButtonSet.OK);
+      return;
+    }
+
+    sheet.getRange(2, 1, lastDataRow - 1, 6).clearContent();
+
+    ui.alert(
+      "Done",
+      "Cleared columns A–F from rows 2 to " + lastDataRow + ".\nFormulas in G+ are untouched.",
+      ui.ButtonSet.OK
+    );
+
+    logEvent("ORCHESTRATOR", "0",
+      "Manually cleared Consolidated Result columns A–F (rows 2–" + lastDataRow + ")", "✓");
+
+  } catch (error) {
+    Logger.log("ERROR clearing Consolidated Result: " + error.message);
+    ui.alert("Error", error.message, ui.ButtonSet.OK);
+  }
+}
+
+function clearFinalOutputData() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    "Clear Final Output",
+    "This will clear all data in the FinalOutput sheet from row 2 onwards.\n\nAre you sure?",
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) {
+    ui.alert("Cancelled", "No data was cleared.", ui.ButtonSet.OK);
+    return;
+  }
+
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("FinalOutput");
+
+    if (!sheet) throw new Error("FinalOutput sheet not found");
+
+    const lastRow = sheet.getLastRow();
+
+    if (lastRow <= 1) {
+      ui.alert("Nothing to Clear", "FinalOutput sheet is already empty.", ui.ButtonSet.OK);
+      return;
+    }
+
+    sheet.getRange(2, 1, lastRow - 1, 13).clearContent();
+
+    ui.alert(
+      "Done",
+      "Cleared FinalOutput data from rows 2 to " + lastRow + ".",
+      ui.ButtonSet.OK
+    );
+
+    logEvent("ORCHESTRATOR", "0",
+      "Manually cleared FinalOutput sheet (rows 2–" + lastRow + ")", "✓");
+
+  } catch (error) {
+    Logger.log("ERROR clearing FinalOutput: " + error.message);
+    ui.alert("Error", error.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * diagnoseStudentGPA
+ * Discovery tool: prompts for a Reg No, then scans every sheet in the
+ * processor spreadsheet. For any sheet containing that Reg No, it dumps the
+ * header row + every matching row into _TempDiagnosis so we can see exactly
+ * which course / credit / grade is producing the wrong grade-points total.
+ *
+ * No assumptions about column layout — it locates the Reg No by value, not
+ * by position, so it works against Consolidated Result, FinalOutput, CMF, etc.
+ */
+function diagnoseStudentGPA() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const resp = ui.prompt('Diagnose GPA', 'Enter Reg No (e.g. 24010108006):', ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const regNo = String(resp.getResponseText()).trim();
+  if (!regNo) { ui.alert('No Reg No entered.'); return; }
+
+  // Fresh output sheet
+  const OUT = '_TempDiagnosis';
+  let out = ss.getSheetByName(OUT);
+  if (out) ss.deleteSheet(out);
+  out = ss.insertSheet(OUT);
+
+  const block = [];           // rows to write
+  const fmt = [];             // {row, col, bg} colour instructions
+  let r = 0;
+
+  const push = (cells, bg) => {
+    block.push(cells);
+    if (bg) for (let c = 0; c < cells.length; c++) fmt.push({ row: r, col: c, bg });
+    r++;
+  };
+
+  push([`GPA diagnosis for Reg No: ${regNo}`], '#1a73e8');
+  push([`Generated: ${new Date()}`]);
+  push([]);
+
+  const sheets = ss.getSheets();
+  let hitSheets = 0;
+
+  sheets.forEach(sh => {
+    const name = sh.getName();
+    if (name === OUT) return;
+
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastCol ? sh.getLastCol() : sh.getLastColumn();
+    if (lastRow < 1 || lastCol < 1) return;
+
+    const values = sh.getRange(1, 1, lastRow, lastCol).getValues();
+
+    // find rows where any cell equals the reg no (string-compared, trimmed)
+    const matchRows = [];
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      for (let j = 0; j < row.length; j++) {
+        if (String(row[j]).trim() === regNo) { matchRows.push(i); break; }
+      }
+    }
+    if (!matchRows.length) return;
+
+    hitSheets++;
+    push([`SHEET: ${name}`], '#34a853');
+    push(values[0].map(v => String(v)), '#e8eaed');     // header row
+    matchRows.forEach(i => {
+      if (i === 0) return;                               // header already shown
+      push(values[i].map(v => v === '' ? '' : v), '#fff7e0');
+    });
+    push([]);
+  });
+
+  if (!hitSheets) push([`No rows found containing "${regNo}" in any sheet.`], '#ea4335');
+
+  // pad rows to equal width for setValues
+  const width = block.reduce((m, row) => Math.max(m, row.length), 1);
+  const padded = block.map(row => {
+    const copy = row.slice();
+    while (copy.length < width) copy.push('');
+    return copy;
+  });
+
+  out.getRange(1, 1, padded.length, width).setValues(padded);
+
+  // apply colours
+  fmt.forEach(f => {
+    out.getRange(f.row + 1, f.col + 1).setBackground(f.bg);
+    if (f.bg === '#1a73e8' || f.bg === '#34a853') {
+      out.getRange(f.row + 1, f.col + 1).setFontColor('#ffffff').setFontWeight('bold');
+    }
+  });
+
+  out.autoResizeColumns(1, width);
+  ss.setActiveSheet(out);
+  ui.alert(`Done. Found "${regNo}" in ${hitSheets} sheet(s). See ${OUT}.`);
+}
+
+/**
+ * findGradeTableIssue
+ * Minimal output. Scans all sheets and prints ONLY:
+ *   - rows containing "BSH-P"  (to find the grade-table mapping)
+ *   - rows containing a 9.5 grade point (the suspected bad band)
+ * Each match is shown with its sheet name + header row for context.
+ */
+function findGradeTableIssue() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const OUT = '_TempDiagnosis';
+  let out = ss.getSheetByName(OUT);
+  if (out) ss.deleteSheet(out);
+  out = ss.insertSheet(OUT);
+
+  const rows = [];
+  const targets = ['bsh-p', '9.5'];
+
+  ss.getSheets().forEach(sh => {
+    const name = sh.getName();
+    if (name === OUT) return;
+    const lr = sh.getLastRow(), lc = sh.getLastColumn();
+    if (lr < 1 || lc < 1) return;
+
+    const vals = sh.getRange(1, 1, lr, lc).getValues();
+    const header = vals[0].map(v => String(v));
+
+    let headerShown = false;
+    for (let i = 1; i < vals.length; i++) {
+      const cells = vals[i].map(v => String(v).trim().toLowerCase());
+      const hit = targets.find(t => cells.includes(t));
+      if (!hit) continue;
+
+      if (!headerShown) {
+        rows.push([`SHEET: ${name}`]);
+        rows.push(header);
+        headerShown = true;
+      }
+      rows.push([`[match: ${hit}]`, ...vals[i].map(v => v === '' ? '' : v)]);
+    }
+    if (headerShown) rows.push([]);
+  });
+
+  if (!rows.length) rows.push(['No rows containing "BSH-P" or "9.5" found.']);
+
+  const width = rows.reduce((m, r) => Math.max(m, r.length), 1);
+  const padded = rows.map(r => { const c = r.slice(); while (c.length < width) c.push(''); return c; });
+  out.getRange(1, 1, padded.length, width).setValues(padded);
+  out.autoResizeColumns(1, Math.min(width, 30));
+  ss.setActiveSheet(out);
+  ui.alert(`Done. ${rows.length} lines. See ${OUT}.`);
+}

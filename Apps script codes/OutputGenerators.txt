@@ -1,0 +1,1019 @@
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 1: FINAL OUTPUT
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Populate FinalOutput sheet
+ * Reads Consolidated Result, aggregates by regnNo, calculates GPA
+ * @return {Object} Result with population summary
+ */
+function populateFinalOutput() {
+  try {
+    logEvent("FINAL_OUTPUT", "4", "Starting Final Output population", "ℹ");
+    const startTime = Date.now();
+
+    logEvent("FINAL_OUTPUT", "4", "Reading Consolidated Result sheet...", "ℹ");
+    const consolidatedData = _readConsolidatedResultData();
+    logEvent("FINAL_OUTPUT", "4", "Read " + consolidatedData.length + " rows", "✓");
+
+    logEvent("FINAL_OUTPUT", "4", "Loading Academic Year data...", "ℹ");
+    const academicYearLookup = _loadAcademicYearLookup();
+    logEvent("FINAL_OUTPUT", "4", "Loaded " + Object.keys(academicYearLookup).length + " student records", "✓");
+
+    logEvent("FINAL_OUTPUT", "4", "Loading grade conversion tables...", "ℹ");
+    const gradeTables      = _loadGradeConversionTable();     // { "II-A": [...], "II-B": [...] }
+    const gradeTableMapping = _loadGradeTableMapping();       // { programmeCode → "II-A"|"II-B" }
+    logEvent("FINAL_OUTPUT", "4",
+      "Loaded " + Object.keys(gradeTableMapping).length + " programme→table mappings", "✓");
+
+    logEvent("FINAL_OUTPUT", "4", "Aggregating by Regd No...", "ℹ");
+    const aggregated = _aggregateByRegnNo(consolidatedData);
+    logEvent("FINAL_OUTPUT", "4", "Aggregated " + Object.keys(aggregated).length + " students", "✓");
+
+    logEvent("FINAL_OUTPUT", "4", "Building final output records...", "ℹ");
+    const outputRecords = _buildFinalOutputRecords(aggregated, academicYearLookup, gradeTables, gradeTableMapping);
+    logEvent("FINAL_OUTPUT", "4", "Built " + outputRecords.length + " output records", "✓");
+
+    logEvent("FINAL_OUTPUT", "4", "Writing to FinalOutput sheet...", "ℹ");
+    _writeFinalOutputSheet(outputRecords);
+    logEvent("FINAL_OUTPUT", "4", "FinalOutput sheet updated", "✓");
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    logEvent("FINAL_OUTPUT", "4", "Final Output completed in " + duration + "s", "✓");
+
+    return { success: true, recordsPopulated: outputRecords.length, duration: duration };
+
+  } catch (error) {
+    logEvent("ERROR", "4", "Final Output population failed: " + error.message, "✗");
+    Logger.log("ERROR in populateFinalOutput: " + error.message);
+    throw error;
+  }
+}
+
+// ── Aggregate Consolidated Result by regnNo ──────────────────────────────────
+
+function _aggregateByRegnNo(consolidatedData) {
+  try {
+    const aggregated = {};
+    
+    for (const row of consolidatedData) {
+      const regnNo    = String(row[0]).trim();   // A: Regd No
+      const credits   = Number(row[14]) || 0;   // O: Credits
+      const combNP    = row[25];                 // Z: COMB-NP
+      const cieNP     = row[17];                 // R: CIE-NP
+      const pfwStatus = String(row[26]).trim();  // AA: P/F/W Status
+      
+      if (!regnNo) continue;
+      
+      if (!aggregated[regnNo]) {
+        aggregated[regnNo] = {
+          regnNo:          regnNo,
+          totalPapers:     0,
+          sumCredits:      0,
+          sumCreditCombNP: 0,
+          hasFails:        false,
+          hasAbsent:       false
+        };
+      }
+      
+      aggregated[regnNo].totalPapers += 1;
+      aggregated[regnNo].sumCredits  += credits;
+      
+      // Determine effective NP value for GPA calculation
+      // If COMB-NP is a number → use it
+      // If COMB-NP is "--" (no ESE data) → fall back to CIE-NP
+      // If COMB-NP is "< 4" or "< 5" → fail, skip (hasFails handles it)
+      const combNPNum = Number(combNP);
+      const cieNPNum  = Number(cieNP);
+      
+      if (!isNaN(combNPNum) && combNP !== "" && combNP !== null) {
+        // Normal case — COMB-NP is a valid number
+        aggregated[regnNo].sumCreditCombNP += credits * combNPNum;
+      } else if (String(combNP).trim() === "--" && !isNaN(cieNPNum) && cieNP !== "") {
+        // COMB-NP is "--" (no ESE) → use CIE-NP as fallback
+        aggregated[regnNo].sumCreditCombNP += credits * cieNPNum;
+      }
+      // else: "< 4", "< 5", "" → skip, hasFails/hasAbsent handles it
+      
+      if (pfwStatus === "Fails")  aggregated[regnNo].hasFails  = true;
+      if (pfwStatus === "Absent") aggregated[regnNo].hasAbsent = true;
+    }
+    
+    Logger.log("✓ Aggregated " + Object.keys(aggregated).length + " unique students");
+    return aggregated;
+    
+  } catch (error) {
+    Logger.log("Error aggregating data: " + error.message);
+    throw error;
+  }
+}
+
+// ── Build Final Output Records ────────────────────────────────────────────────
+
+function _buildFinalOutputRecords(aggregated, academicYearLookup, gradeTables, gradeTableMapping) {
+  try {
+    const records     = [];
+    let notFoundCount = 0;
+
+    for (const regnNo in aggregated) {
+      const agg = aggregated[regnNo];
+
+      const student = academicYearLookup[regnNo];
+      if (!student) {
+        Logger.log("⚠ Regd No " + regnNo + " not found in Academic Year");
+        notFoundCount++;
+        continue;
+      }
+
+      const sumCredits      = agg.sumCredits;
+      const sumCreditCombNP = agg.sumCreditCombNP;
+
+      // ── Credit-match withheld check ───────────────────────────────────────────
+      // If SMF has a Sem-Credits value for this student and it doesn't match
+      // the credits summed from Consolidated Result, the result cannot be
+      // certified — mark WITHHELD and skip GPA calculation.
+      const smfSemCredits  = student.semCredits;   // null if SMF column absent or blank
+      const creditMismatch = smfSemCredits !== null &&
+                            smfSemCredits > 0     &&
+                            sumCredits !== smfSemCredits;
+
+      if (creditMismatch) {
+        Logger.log("⚠ Credit mismatch for " + regnNo +
+          " — sumCredits=" + sumCredits +
+          " | SMF Sem-Credits=" + smfSemCredits +
+          " — marking WITHHELD");
+
+        records.push({
+          programme:       student.programme,
+          campus:          student.campus,
+          semester:        student.semester,
+          regnNo:          regnNo,
+          name:            student.name,
+          totalPapers:     agg.totalPapers,
+          calculatedGPA:   "",
+          sumCredits:      sumCredits,
+          sumCreditCombNP: "",
+          publishedGPA:    "",
+          letterGrade:     "",
+          qa:              "",
+          isAbsent:        0,
+          withheldCase:    "WITHHELD"
+        });
+        continue;
+      }
+
+      const calculatedGPA = sumCredits > 0
+        ? Math.round((sumCreditCombNP / sumCredits) * 10) / 10
+        : 0;
+
+      let publishedGPA = calculatedGPA;
+      let isAbsent     = 0;
+
+      if (agg.hasAbsent) {
+        publishedGPA = "Absent";
+        isAbsent     = 1;
+      } else if (agg.hasFails) {
+        publishedGPA = "Fail";
+        isAbsent     = 0;
+      }
+
+      const publishedGPAFinal = (typeof publishedGPA === "number")
+        ? Math.round(publishedGPA * 10) / 10
+        : publishedGPA;
+
+      // ── Resolve which grade table this programme uses ──────────────────
+      let fullLetterGrade = "";
+      if (typeof publishedGPAFinal === "number") {
+        const tableCode = gradeTableMapping[student.programme] || "II-A"; // safe default
+        const tableRows = gradeTables[tableCode];
+        if (!tableRows) {
+          Logger.log("⚠ No grade table found for code '" + tableCode
+            + "' (programme: " + student.programme + ") — defaulting to II-A");
+        }
+        fullLetterGrade = _getLetterGrade(publishedGPAFinal, tableRows || gradeTables["II-A"]);
+      }
+
+      const gradeSplit = _splitLetterGrade(fullLetterGrade);
+
+      records.push({
+        programme:       student.programme,
+        campus:          student.campus,
+        semester:        student.semester,
+        regnNo:          regnNo,
+        name:            student.name,
+        totalPapers:     agg.totalPapers,
+        calculatedGPA:   calculatedGPA,
+        sumCredits:      sumCredits,
+        sumCreditCombNP: sumCreditCombNP,
+        publishedGPA:    publishedGPAFinal,
+        letterGrade:     gradeSplit.code,
+        qa:              gradeSplit.qualifier,
+        isAbsent:        isAbsent,
+        withheldCase:    student.withheld ? "WITHHELD" : ""
+      });
+    }
+
+    if (notFoundCount > 0) {
+      Logger.log("⚠ " + notFoundCount + " students not found in Academic Year lookup");
+    }
+
+    Logger.log("✓ Built " + records.length + " final output records");
+    return records;
+
+  } catch (error) {
+    Logger.log("Error building final output records: " + error.message);
+    throw error;
+  }
+}
+
+// ── Get Letter Grade from Conversion Table ────────────────────────────────────
+
+function _getLetterGrade(gpa, tableRows) {
+  try {
+    if (!tableRows || tableRows.length === 0) return "";
+    const gpaNum = Number(gpa);
+    if (isNaN(gpaNum)) return "";
+
+    for (const row of tableRows) {
+      const ll = Number(row[0]);
+      const ul = Number(row[1]);
+      const lg = String(row[2]).trim();
+      const qa = String(row[3]).trim();
+
+      if (!isNaN(ll) && !isNaN(ul) && gpaNum >= ll && gpaNum <= ul) {
+        return lg + " (" + qa + ")";
+      }
+    }
+
+    return "";
+
+  } catch (error) {
+    Logger.log("Error getting letter grade: " + error.message);
+    return "";
+  }
+}
+
+// ── Write FinalOutput Sheet ───────────────────────────────────────────────────
+
+function _writeFinalOutputSheet(records) {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("FinalOutput");
+    
+    if (!sheet) throw new Error("FinalOutput sheet not found");
+    
+    // Clear existing data
+    const lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      sheet.getRange(2, 1, lastRow - 1, 14).clearContent();
+    }
+    
+    if (records.length === 0) {
+      Logger.log("⚠ No records to write to FinalOutput");
+      return;
+    }
+    
+    const batchValues = records.map(r => [
+          r.programme,
+          r.campus,
+          r.semester,
+          r.regnNo,
+          r.name,
+          r.totalPapers,
+          r.calculatedGPA,
+          r.sumCredits,
+          r.sumCreditCombNP,
+          r.publishedGPA,
+          r.letterGrade,   // col 11: e.g. "A"
+          r.qa,            // col 12: e.g. "Good"  ← NEW
+          r.isAbsent,       // col 13
+          r.withheldCase
+      ]);
+
+const startRow = 2;
+const numRows  = batchValues.length;
+
+sheet.getRange(startRow, 1, numRows, 14).setValues(batchValues);  // 13 cols now
+
+// Format GPA columns
+sheet.getRange(startRow, 7,  numRows, 1).setNumberFormat("0.0");  // G: Calculated GPA
+    sheet.getRange(startRow, 10, numRows, 1).setNumberFormat("0.0");  // J: Published GPA
+
+    // Highlight withheld rows in column N
+    for (let i = 0; i < numRows; i++) {
+      if (batchValues[i][13] === "WITHHELD") {
+        sheet.getRange(startRow + i, 14, 1, 1)
+          .setBackground("#FFD54F")    // amber
+          .setFontWeight("bold")
+          .setFontColor("#B71C1C");    // dark red text
+      }
+    }
+    
+    Logger.log("✓ Wrote " + numRows + " records to FinalOutput sheet");
+    
+  } catch (error) {
+    Logger.log("Error writing FinalOutput: " + error.message);
+    throw error;
+  }
+}
+
+
+// ── Load Programme → Grade Table Mapping ─────────────────────────────────────
+
+/**
+ * Reads the "GPA to LG" column (col I) from Programs Table.
+ * Returns a map of programme code → table code ("II-A" or "II-B").
+ *
+ * @return {Object} { "BAH-E/BAHR-E": "II-B", "BSH-CS/BSHR-CS": "II-A", ... }
+ */
+function _loadGradeTableMapping() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Programs Table");
+    if (!sheet) throw new Error("Programs Table not found");
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return {};
+
+    // Cols A–I: A=S.No, B=Program Code, C=Name-Acronym, ..., I=GPA to LG
+    const data = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+    const map  = {};
+
+    for (const row of data) {
+      const progCode  = String(row[1]).trim(); // col B: Program Code
+      const tableCode = String(row[8]).trim(); // col I: GPA to LG  ("II-A" or "II-B")
+      if (progCode && tableCode && tableCode !== "undefined") {
+        map[progCode] = tableCode;
+      }
+    }
+
+    Logger.log("✓ Loaded grade table mapping: " + Object.keys(map).length + " programmes");
+    return map;
+
+  } catch (error) {
+    Logger.log("Error loading grade table mapping: " + error.message);
+    return {};
+  }
+}
+
+// ── Load Grade Conversion Table ───────────────────────────────────────────────
+
+function _loadGradeConversionTable() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Stage1Working");
+    if (!sheet) throw new Error("'Stage 1 Working' sheet not found");
+
+    // Data rows only — no header row — so no skip logic needed in _getLetterGrade
+    const tableIIA = sheet.getRange("U25:X31").getValues(); // 7 rows × [LL, UL, LG, QA]
+    const tableIIB = sheet.getRange("U37:X43").getValues(); // 7 rows × [LL, UL, LG, QA]
+
+    Logger.log("✓ Loaded grade tables: II-A (" + tableIIA.length
+      + " bands), II-B (" + tableIIB.length + " bands)");
+
+    return { "II-A": tableIIA, "II-B": tableIIB };
+
+  } catch (error) {
+    Logger.log("Error loading grade conversion tables: " + error.message);
+    throw error;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 2: FAILURE LIST
+// ════════════════════════════════════════════════════════════════════════════
+
+function populateFailureList() {
+  try {
+    logEvent("FAILURE_LIST", "5", "Rebuilding Failure List...", "ℹ");
+    const startTime = Date.now();
+
+    const consolidatedData   = _readConsolidatedResultData();
+    const paperCodeTable     = _loadPaperCodeTableLookup();
+    const academicYearLookup = _loadAcademicYearLookup();
+    const examDate           = _getExamDate();
+
+    const failureRecords = _buildFailureRecords(consolidatedData, paperCodeTable, academicYearLookup, examDate);
+
+    failureRecords.sort((a, b) =>
+      a.programme !== b.programme ? a.programme.localeCompare(b.programme) : a.regnNo.localeCompare(b.regnNo));
+
+    _writeFailureRecords(failureRecords);
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    logEvent("FAILURE_LIST", "5", failureRecords.length + " failure records in " + duration + "s", "✓");
+    return { success: true, recordsPopulated: failureRecords.length, duration };
+
+  } catch (error) {
+    logEvent("ERROR", "5", "Failure List population failed: " + error.message, "✗");
+    throw error;
+  }
+}
+
+
+
+// ── Read Consolidated Result — Incremental ────────────────────────────────────
+
+function _readConsolidatedResultIncremental(newRecordsKeys) {
+  try {
+    if (!newRecordsKeys || newRecordsKeys.length === 0) return [];
+    
+    // Build hash for O(1) lookup
+    const keysHash = {};
+    for (const key of newRecordsKeys) keysHash[key] = true;
+    
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Consolidated Result");
+    
+    if (!sheet) throw new Error("Consolidated Result sheet not found");
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return [];
+    
+    const data       = sheet.getRange(2, 1, lastRow - 1, 29).getValues();
+    const newRecords = [];
+    
+    for (const row of data) {
+      const regnNo    = String(row[0]).trim();
+      const paperCode = String(row[1]).trim();
+      
+      if (!regnNo || !paperCode) continue;
+      
+      if (keysHash[regnNo + "|" + paperCode]) {
+        newRecords.push(row);
+      }
+    }
+    
+    Logger.log("✓ Read " + newRecords.length + " new records from Consolidated Result");
+    return newRecords;
+    
+  } catch (error) {
+    Logger.log("Error reading Consolidated Result: " + error.message);
+    return [];
+  }
+}
+
+// ── Build Failure Records ─────────────────────────────────────────────────────
+
+function _resolvePaperInfo(paperCodeTable, paperCode, studentSemester) {
+  if (paperCodeTable[paperCode]) return paperCodeTable[paperCode];
+
+  const prefix   = paperCode + "-";
+  const variants = Object.keys(paperCodeTable).filter(c => c.startsWith(prefix) && c.includes("-Sem-"));
+  if (variants.length === 0) return null;
+
+  const sameSem = variants.find(c => c.includes("-Sem-" + studentSemester + "-"));
+  return paperCodeTable[sameSem || variants[0]];
+}
+
+function _buildFailureRecords(consolidatedData, paperCodeTable, academicYearLookup, examDate) {
+  const records = [];
+  const blank   = { courseCategory: "", paperTitle: "", programName: "", semester: "" };
+
+  for (const row of consolidatedData) {
+    const regnNo    = String(row[0]).trim();
+    const paperCode = String(row[1]).trim();
+    const pfwStatus = String(row[26]).trim();
+
+    if (pfwStatus !== "Fails" && pfwStatus !== "Absent") continue;
+
+    const student = academicYearLookup[regnNo];
+    if (!student) { Logger.log("⚠ Regd No " + regnNo + " not found in Academic Year"); continue; }
+
+    let paperInfo = _resolvePaperInfo(paperCodeTable, paperCode, student.semester);
+    if (!paperInfo) {
+      Logger.log("⚠ Paper Code " + paperCode + " not found in Paper Code Table — written with blank course details");
+      paperInfo = blank;
+    }
+
+    records.push({
+      exam:            examDate,
+      courseProgramme: paperInfo.programName,
+      courseSemester:  paperInfo.semester,
+      studentSemester: student.semester,
+      programme:       student.programme,
+      campus:          student.campus,
+      semester:        student.semester,
+      regnNo:          regnNo,
+      name:            student.name,
+      absent:          pfwStatus === "Absent" ? 1 : 0,
+      paperCode:       paperCode,
+      courseCategory:  paperInfo.courseCategory,
+      paperTitle:      paperInfo.paperTitle,
+      ciePercent:      row[16],
+      esePercent:      row[22],
+      combPercent:     row[24]
+    });
+  }
+
+  Logger.log("✓ Built " + records.length + " failure records from " + consolidatedData.length + " rows");
+  return records;
+}
+// ── Append Failure Records to Sheet ──────────────────────────────────────────
+
+function _appendFailureRecords(records) {
+  try {
+    if (records.length === 0) return;
+    
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("FailureList");
+    
+    if (!sheet) throw new Error("FailureList sheet not found");
+    
+    const startRow    = sheet.getLastRow() + 1;
+    const batchValues = records.map(r => [
+      r.slNo,
+      r.exam,
+      r.programme,
+      r.campus,
+      r.semester,
+      r.regnNo,
+      r.name,
+      r.absent,
+      r.paperCode,
+      r.courseCategory,
+      r.paperTitle,
+      r.ciePercent  || "",
+      r.esePercent  || "",
+      r.combPercent || ""
+    ]);
+    
+    const numRows = batchValues.length;
+    
+    sheet.getRange(startRow, 1, numRows, 14).setValues(batchValues);
+    
+    // Format percentage columns
+    sheet.getRange(startRow, 12, numRows, 1).setNumberFormat("0.0"); // CIE %
+    sheet.getRange(startRow, 13, numRows, 1).setNumberFormat("0.0"); // ESE %
+    sheet.getRange(startRow, 14, numRows, 1).setNumberFormat("0.0"); // COMB %
+    
+    Logger.log("✓ Appended " + numRows + " failure records from row " + startRow);
+    
+  } catch (error) {
+    Logger.log("Error appending failure records: " + error.message);
+    throw error;
+  }
+}
+
+const FAILURE_LIST_COLUMNS = {
+  "S.No.":             (r, i) => i + 1,
+  "Exam":              r => r.exam,
+  "Course-Programme":  r => r.courseProgramme,
+  "Course-Semester":   r => r.courseSemester,
+  "Student-Semester":  r => r.studentSemester,
+  "Programme":         r => r.programme,
+  "Campus":            r => r.campus,
+  "Semester":          r => r.semester,
+  "Regd No":           r => r.regnNo,
+  "Name":              r => r.name,
+  "Absent?":           r => r.absent,
+  "Paper Code":        r => r.paperCode,
+  "Course Category":   r => r.courseCategory,
+  "Paper Title":       r => r.paperTitle,
+  "CIE %":             r => r.ciePercent,
+  "ESE %":             r => r.esePercent,
+  "COMB %":            r => r.combPercent
+};
+
+function _writeFailureRecords(records) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("FailureList");
+  if (!sheet) throw new Error("FailureList sheet not found");
+
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+
+  const missing = Object.keys(FAILURE_LIST_COLUMNS).filter(h => !headers.includes(h));
+  if (missing.length) Logger.log("⚠ FailureList headers not found: " + missing.join(", "));
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  if (records.length === 0) return;
+
+  const values = records.map((r, i) =>
+    headers.map(h => {
+      const fn = FAILURE_LIST_COLUMNS[h];
+      const v  = fn ? fn(r, i) : "";
+      return v === undefined || v === null ? "" : v;
+    })
+  );
+
+  sheet.getRange(2, 1, values.length, lastCol).setValues(values);
+
+  ["CIE %", "ESE %", "COMB %"].forEach(h => {
+    const c = headers.indexOf(h);
+    if (c !== -1) sheet.getRange(2, c + 1, values.length, 1).setNumberFormat("0.0");
+  });
+}
+
+// ── Get Exam Date ─────────────────────────────────────────────────────────────
+
+function _getExamDate() {
+  try {
+    const now   = new Date();
+    const month = now.toLocaleString("en-US", { month: "long" });
+    const year  = now.getFullYear();
+    return month + " " + year;
+  } catch (error) {
+    Logger.log("Error getting exam date: " + error.message);
+    return "";
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 3: SHARED LOOKUPS
+// Used by both FinalOutput and FailureList sections
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Read all data from Consolidated Result sheet
+ * @return {Array} 2D array of all rows
+ */
+function _readConsolidatedResultData() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(getProcessorSheetName());
+    
+    if (!sheet) throw new Error("Consolidated Result sheet not found");
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) {
+      Logger.log("⚠ Consolidated Result is empty");
+      return [];
+    }
+    
+    const data = sheet.getRange(2, 1, lastRow - 1, 28).getValues();
+    Logger.log("✓ Read " + data.length + " rows from Consolidated Result");
+    
+    return data;
+    
+  } catch (error) {
+    Logger.log("Error reading Consolidated Result: " + error.message);
+    throw error;
+  }
+}
+
+/**
+ * Load Academic Year sheet into lookup map
+ * Used by both FinalOutput and FailureList
+ * @return {Object} { regnNo → { campus, semester, name, programme } }
+ */
+function _loadAcademicYearLookup() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Academic Year");
+
+    if (!sheet) throw new Error("Academic Year sheet not found");
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return {};
+
+    const data      = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+    const lookupMap = {};
+
+    for (const row of data) {
+      const raw    = row[2];
+      const regnNo = String(/^\d+(\.\d+)?([eE][+\-]?\d+)?$/.test(String(raw)) ? Math.round(Number(raw)) : raw).trim();
+      if (!regnNo) continue;
+
+      lookupMap[regnNo] = {
+        regnNo:    regnNo,
+        campus:    String(row[1]).trim(), // B: Campus
+        semester:  String(row[4]).trim(), // E: Semester
+        name:      String(row[5]).trim(), // F: Name
+        programme: String(row[6]).trim(), // G: Programme
+        batch:     ""                     // populated from SMF below
+      };
+    }
+
+    Logger.log("✓ Loaded Academic Year lookup: " + Object.keys(lookupMap).length + " records");
+
+    // ── Read batch + Sem-Credits from SMF ────────────────────────────────────
+    try {
+      const smfFileId    = getSMFFileId();
+      const smfSheetName = getSMFSheetName();
+      const smfFile      = getFileById(smfFileId);
+      const smfSs        = SpreadsheetApp.open(smfFile);
+      const smfSheet     = smfSs.getSheetByName(smfSheetName);
+
+      if (!smfSheet) throw new Error("SMF sheet not found: " + smfSheetName);
+
+      const smfLastRow = smfSheet.getLastRow();
+      const smfLastCol = smfSheet.getLastColumn();
+
+      if (smfLastRow > 1) {
+        // ── Dynamic header detection ──────────────────────────────────────────
+        const smfHeaders = smfSheet.getRange(1, 1, 1, smfLastCol).getValues()[0];
+
+        let regnNoColIdx    = 11;  // fallback: col L (0-based index 11)
+        let batchColIdx     = 9;   // fallback: col J (0-based index 9)
+        let semCreditsColIdx = -1;
+
+        for (let i = 0; i < smfHeaders.length; i++) {
+          const h = String(smfHeaders[i] || "").trim().toUpperCase();
+          if (h === "REGD. NO." || h === "REGD NO" || h === "REGD.NO." || h === "REG NO") regnNoColIdx     = i;
+          if (h === "BATCH")                                                                batchColIdx      = i;
+          if (h === "SEM-CREDITS" || h === "SEM CREDITS" || h === "SEMCREDITS" ||
+              h === "SEMESTER CREDITS" || h === "SEM_CREDITS")                             semCreditsColIdx = i;
+        }
+
+        if (semCreditsColIdx === -1) {
+          Logger.log("⚠ SMF has no 'Sem-Credits' column — credit-match withheld check will be skipped");
+        } else {
+          Logger.log("✓ SMF Sem-Credits column detected at index " + semCreditsColIdx +
+            " [" + smfHeaders[semCreditsColIdx] + "]");
+        }
+
+        const colsToRead = smfLastCol;
+        const smfData    = smfSheet.getRange(2, 1, smfLastRow - 1, colsToRead).getValues();
+
+        let batchFound      = 0;
+        let semCreditsFound = 0;
+
+        for (const row of smfData) {
+          const regnNo = String(row[regnNoColIdx] || "").trim();
+          const batch  = String(row[batchColIdx]  || "").trim();
+
+          if (!regnNo) continue;
+
+          if (lookupMap[regnNo]) {
+            lookupMap[regnNo].batch = batch;
+            if (batch) batchFound++;
+
+            if (semCreditsColIdx !== -1) {
+              const rawSemCredits = row[semCreditsColIdx];
+              const semCredits    = (rawSemCredits !== "" && rawSemCredits !== null && rawSemCredits !== undefined)
+                ? Number(rawSemCredits)
+                : null;
+
+              lookupMap[regnNo].semCredits = (!isNaN(semCredits) && semCredits !== null) ? semCredits : null;
+              if (lookupMap[regnNo].semCredits !== null) semCreditsFound++;
+            }
+          }
+        }
+
+        Logger.log("✓ Batch loaded from SMF: "       + batchFound      + " records matched");
+        Logger.log("✓ Sem-Credits loaded from SMF: "  + semCreditsFound + " records matched");
+      }
+
+      } catch (smfError) {
+      Logger.log("⚠ Could not load batch/semCredits from SMF: " + smfError.message);
+      Logger.log("⚠ All student records will have empty batch — Rule 0 will block all programmes");
+    }
+
+    return lookupMap;
+
+  } catch (error) {
+    Logger.log("Error loading Academic Year lookup: " + error.message);
+    throw error;
+  }
+}
+
+
+function _loadPaperCodeTableLookup() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Paper Code Table");
+    if (!sheet) throw new Error("Paper Code Table sheet not found");
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return {};
+
+    const data      = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+    const lookupMap = {};
+
+    for (const row of data) {
+      const paperCode = String(row[0]).trim();
+      if (!paperCode) continue;
+      lookupMap[paperCode] = {
+        paperCode:      paperCode,
+        courseCategory: String(row[1]).trim(),
+        paperTitle:     String(row[3]).trim(),
+        programName:    String(row[5]).trim(),
+        semester:       String(row[7]).trim()
+      };
+    }
+    return lookupMap;
+
+  } catch (error) {
+    Logger.log("Error loading Paper Code Table lookup: " + error.message);
+    return {};
+  }
+}
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 4: DIALOGS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Show program selection dialog (text prompt)
+ * @return {string|null} Selected program code or null if cancelled
+ */
+function showProgramSelectionDialog() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Programs Table");
+    
+    if (!sheet) {
+      SpreadsheetApp.getUi().alert("Error", "Programs Table not found. Run full sync first.", SpreadsheetApp.getUi().ButtonSet.OK);
+      return null;
+    }
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      SpreadsheetApp.getUi().alert("Error", "Programs Table is empty.", SpreadsheetApp.getUi().ButtonSet.OK);
+      return null;
+    }
+    
+    const data     = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+    const programs = data.map(r => String(r[0]).trim()).filter(p => p);
+    
+    if (programs.length === 0) {
+      SpreadsheetApp.getUi().alert("Error", "No programs found.", SpreadsheetApp.getUi().ButtonSet.OK);
+      return null;
+    }
+    
+    let programList = "Available Programs:\n\n";
+    programs.forEach((p, i) => { programList += (i + 1) + ". " + p + "\n"; });
+    
+    const ui       = SpreadsheetApp.getUi();
+    const response = ui.prompt(
+      "Select Program",
+      programList + "\nEnter program code (or 'ALL' for all programs):",
+      ui.ButtonSet.OK_CANCEL
+    );
+    
+    if (response.getSelectedButton() !== ui.Button.OK) return null;
+    
+    const input = response.getResponseText().trim();
+    
+    if (input.toUpperCase() === "ALL") return "ALL";
+    
+    if (programs.includes(input)) return input;
+    
+    ui.alert("Invalid", "Program '" + input + "' not found.", ui.ButtonSet.OK);
+    return null;
+    
+  } catch (error) {
+    Logger.log("ERROR in showProgramSelectionDialog: " + error.message);
+    SpreadsheetApp.getUi().alert("Error", error.message, SpreadsheetApp.getUi().ButtonSet.OK);
+    return null;
+  }
+}
+
+/**
+ * Show program selection dropdown (HTML dialog — better UX)
+ */
+function showProgramSelectionDropdown() {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Programs Table");
+    
+    if (!sheet) {
+      SpreadsheetApp.getUi().alert("Error", "Programs Table not found.", SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      SpreadsheetApp.getUi().alert("Error", "Programs Table is empty.", SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+    
+    const programs = sheet.getRange(2, 2, lastRow - 1, 1).getValues()
+      .map(r => String(r[0]).trim())
+      .filter(p => p);
+    
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <base target="_top">
+          <style>
+            body { font-family: Arial, sans-serif; padding: 20px; }
+            h3   { margin-top: 0; color: #1a73e8; }
+            select {
+              width: 100%; padding: 8px;
+              font-size: 14px; margin: 10px 0;
+            }
+            button {
+              background: #1a73e8; color: white;
+              padding: 10px 20px; border: none;
+              border-radius: 4px; cursor: pointer;
+              font-size: 14px; margin-right: 10px;
+            }
+            button:hover { background: #1557b0; }
+            .cancel { background: #5f6368; }
+            .cancel:hover { background: #3c4043; }
+          </style>
+        </head>
+        <body>
+          <h3>Select Program to Process</h3>
+          <select id="programSelect">
+            <option value="">-- Select a Program --</option>
+            <option value="ALL">ALL PROGRAMS</option>
+            ${programs.map(p => `<option value="${p}">${p}</option>`).join("")}
+          </select>
+          <br><br>
+          <button onclick="submit()">Process</button>
+          <button class="cancel" onclick="google.script.host.close()">Cancel</button>
+          <script>
+            function submit() {
+              const val = document.getElementById("programSelect").value;
+              if (!val) { alert("Please select a program"); return; }
+              google.script.run
+                .withSuccessHandler(() => google.script.host.close())
+                .processSelectedProgram(val);
+            }
+          </script>
+        </body>
+      </html>
+    `;
+    
+    SpreadsheetApp.getUi().showModalDialog(
+      HtmlService.createHtmlOutput(html).setWidth(400).setHeight(220),
+      "Program Selection"
+    );
+    
+  } catch (error) {
+    Logger.log("ERROR in showProgramSelectionDropdown: " + error.message);
+    SpreadsheetApp.getUi().alert("Error", error.message, SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
+ * Called from HTML dialog after user selects a program
+ * @param {string} programCode
+ */
+function processSelectedProgram(programCode) {
+  try {
+    Logger.log("Processing program: " + programCode);
+    runFullSyncForProgram(programCode);
+    SpreadsheetApp.getUi().alert("Success", "Processing completed for: " + programCode, SpreadsheetApp.getUi().ButtonSet.OK);
+  } catch (error) {
+    Logger.log("ERROR processing program: " + error.message);
+    SpreadsheetApp.getUi().alert("Error", error.message, SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 5: TEST FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Test Final Output population
+ */
+function testPopulateFinalOutput() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING FINAL OUTPUT POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const result = populateFinalOutput();
+    
+    Logger.log("Success:  " + result.success);
+    Logger.log("Records:  " + result.recordsPopulated);
+    Logger.log("Duration: " + result.duration + "s");
+    
+    flushLogs();
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+    flushLogs();
+  }
+}
+
+/**
+ * Test Failure List population
+ */
+function testPopulateFailureList() {
+  try {
+    Logger.log("\n═══════════════════════════════════════════════════════");
+    Logger.log("TESTING FAILURE LIST POPULATION");
+    Logger.log("═══════════════════════════════════════════════════════\n");
+    
+    const allKeys = getAllRecordKeysFromConsolidatedResult();
+    Logger.log("Total keys from Consolidated Result: " + allKeys.length);
+    
+    const result = populateFailureList(allKeys);
+    
+    Logger.log("Success:  " + result.success);
+    Logger.log("Records:  " + result.recordsPopulated);
+    Logger.log("Duration: " + result.duration + "s");
+    
+    flushLogs();
+    
+  } catch (error) {
+    Logger.log("\n✗ TEST FAILED: " + error.message);
+    flushLogs();
+  }
+}
+
+function _splitLetterGrade(fullGrade) {
+  if (!fullGrade || fullGrade === "") return { code: "", qualifier: "" };
+  const match = String(fullGrade).match(/^([^\s(]+)\s*\(([^)]+)\)$/);
+  if (match) {
+    return { code: match[1].trim(), qualifier: match[2].trim() };
+  }
+  return { code: fullGrade.trim(), qualifier: "" };
+}
+
+
+
