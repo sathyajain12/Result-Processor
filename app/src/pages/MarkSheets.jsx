@@ -249,7 +249,7 @@ function MarksTable({ sid, component, refresh = 0 }) {
           {cie && state.data?.options.campuses.length > 0 && <select value={f.campus} onChange={e => set({ campus: e.target.value })} aria-label="Campus"><option value="">All campuses</option>{state.data.options.campuses.map(c => <option key={c}>{c}</option>)}</select>}
           <select value={f.programme} onChange={e => set({ programme: e.target.value })} aria-label="Programme"><option value="">All programmes</option>{state.data?.options.programmes.map(c => <option key={c}>{c}</option>)}</select>
           <select value={f.edited} onChange={e => set({ edited: e.target.value })} aria-label="Remarks"><option value="">All rows</option><option value="1">With remarks</option></select>
-          <input type="search" value={typed} onChange={e => setTyped(e.target.value)} placeholder="Regd No or course" aria-label={`Search ${component} marks`} />
+          <input type="search" value={typed} onChange={e => setTyped(e.target.value)} placeholder="Regd No or course code" title="Finds Regd Nos and course codes that begin with what you type" aria-label={`Search ${component} marks`} />
           <a className="btn small" href={`/api/sessions/${enc(sid)}/marksheets/rows?${filters}&format=csv`} download><Icon name="download" />CSV</a>
         </div>
       </div>
@@ -319,7 +319,7 @@ function Body({ d, sid, reload, session }) {
   const has = c => active.some(s => s.component === c);
   // CIE and ESE are fetched separately; each run lists and reads only that component's sheets.
   const fetchAll = async component => {
-    let runId = null, total = null, skipped = 0, sums = { checked: 0, fetched: 0, changed: 0, errors: 0 }, lastTick = Date.now();
+    let runId = null, total = null, skipped = 0, sums = { checked: 0, fetched: 0, changed: 0, errors: 0 }, lastTick = Date.now(), lastReload = 0;
     setProgress({ component, checked: 0, total: null });
     try {
       // 2 sheets a step (reading a sheet takes about 3 ms of CPU; Cloudflare's free plan allows a request 10 ms), at most one
@@ -333,9 +333,9 @@ function Body({ d, sid, reload, session }) {
         for (const k of Object.keys(sums)) sums[k] += r[k] || 0;
         total ??= r.listed ? r.remaining : r.checked + r.remaining;
         setProgress({ component, checked: sums.checked, total, skipped, ...sums, paused: r.rateLimited });
-        // Reloading the page's data costs a request; do it when a step brought marks in, else every fourth step.
-        // The CIE / ESE marks list reads every row of its component, so it reloads at most once a minute (and at the end).
-        if (r.listed || r.fetched > 0 || guard % 4 === 3) reload();
+        // Reloading the sheet list reads every sheet (about 1,200 rows), so during a fetch it reloads at most every 30 s, and
+        // the CIE / ESE marks list at most once a minute; both reload again at the end.
+        if (r.listed || Date.now() - lastReload > 30000) { lastReload = Date.now(); reload(); }
         if (r.fetched > 0 && Date.now() - lastTick > 60000) { lastTick = Date.now(); setTick(t => t + 1); }
         if (r.remaining === 0 && !r.listed) break;
         if (r.listed) continue;
@@ -394,11 +394,14 @@ function Body({ d, sid, reload, session }) {
           <h1>Mark sheets</h1>
           <p className="sub muted">Every teacher's Marks Statement, read straight from Google Sheets. Marks are taken once a sheet is certified (and validated, for ESE), and checked again every morning; a mark changed afterwards is recorded as a correction.</p>
         </div>
-        {can.operate && active.length > 0 && (
+        {active.length > 0 && (
           <div className="row">
+            <Link className="btn" to={`/s/${sid}/marksheets/morning`}><Icon name="history" />Morning summary</Link>
+            {can.operate && <>
             {d.marksDirty && <button className="btn" disabled={busy || !!progress} onClick={compute}><Icon name="compute" />Compute results</button>}
             {has("CIE") && <button className="btn primary" disabled={!!progress} onClick={() => fetchAll("CIE")}><Icon name="sync" />Fetch CIE marks</button>}
             {has("ESE") && <button className="btn primary" disabled={!!progress} onClick={() => fetchAll("ESE")}><Icon name="sync" />Fetch ESE marks</button>}
+            </>}
           </div>
         )}
       </div>
@@ -447,7 +450,7 @@ function Body({ d, sid, reload, session }) {
           <table className="ledger small">
             <thead><tr><th>When</th><th>Type</th><th className="num">Checked</th><th className="num">With marks</th><th className="num">Marks changed</th><th className="num">Need attention</th><th>By</th></tr></thead>
             <tbody>{d.runs.map(r => (
-              <tr key={r.id}><td className="nowrap">{fmtWhen(r.startedAt)}{!r.finishedAt && <span className="tag">in progress</span>}</td><td>{r.trigger === "daily" ? "Morning check" : "Manual"}{r.component ? `, ${r.component}` : r.trigger === "daily" ? "" : ", CIE and ESE"}</td>
+              <tr key={r.id}><td className="nowrap">{fmtWhen(r.startedAt)}{!r.finishedAt && <span className="tag">in progress</span>}</td><td>{r.trigger === "daily" ? <Link to={`/s/${sid}/marksheets/morning?run=${r.id}`}>Morning check</Link> : "Manual"}{r.component ? `, ${r.component}` : r.trigger === "daily" ? "" : ", CIE and ESE"}</td>
                 <td className="num">{r.checked}</td><td className="num">{r.fetched}</td><td className="num">{r.changed}</td><td className="num">{r.errors || ""}</td><td className="small muted">{r.by}</td></tr>
             ))}</tbody>
           </table>

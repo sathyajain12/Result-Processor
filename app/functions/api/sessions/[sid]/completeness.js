@@ -20,6 +20,11 @@ export async function onRequestGet({ env, params, request }) {
       all(db, "SELECT id, key FROM batches WHERE session_id = ?", params.sid), latestRun(db, params.sid)]);
     return json({ overrides, detentionRows, batchIds, marksDirty: !!session.marks_dirty, lastComputedAt: run?.started_at ?? null, runId: run?.id ?? null });
   }
+  // What Compute stored for the run's Rule 1A, "No fetch data" and names, passed on as stored (null for older runs).
+  if (part === "arrival") {
+    const row = await first(db, "SELECT arrival FROM runs WHERE id = ? AND session_id = ?", url.searchParams.get("runId"), params.sid);
+    return new Response(row?.arrival ?? "null", { headers: { "content-type": "application/json; charset=utf-8" } });
+  }
   // The stored report's own rows, a page at a time, for the browser to build the report (on the free plan this request
   // could not do it within 10 ms of CPU): the latest run's issues, results and batches.
   if (part === "exceptions" || part === "results" || part === "batches") {

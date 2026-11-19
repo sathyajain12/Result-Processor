@@ -6,6 +6,8 @@ import { fetchBatch, refreshList } from "../../../../_lib/marksheets.js";
 // One step of a manual fetch of CIE or ESE marks. The first call starts a run (and re-lists that component's folders /
 // course masters); the page keeps calling with the runId until nothing is left. Sheets already fetched are skipped:
 // the morning check re-reads those once a day for corrections.
+// Only the first call counts what is left (the page works out the rest); later calls just say whether any are left,
+// because counting read every due sheet on every step.
 export async function onRequestPost({ env, request, params, data }) {
   requireRole(data.user, "operator");
   const db = env.DB;
@@ -25,7 +27,7 @@ export async function onRequestPost({ env, request, params, data }) {
     return json({ runId: runRow.id, checked: 0, fetched: 0, changed: 0, errors: 0, remaining: n ?? 0, skipped: skipped ?? 0, listed });
   }
   const limit = Math.max(1, Math.min(40, Number(body.limit) || 6));
-  const r = await fetchBatch(env, params.sid, { limit, runId: runRow.id, before: runRow.started_at, component: runRow.component, skipFetched: true });
+  const r = await fetchBatch(env, params.sid, { limit, runId: runRow.id, before: runRow.started_at, component: runRow.component, skipFetched: true, exactRemaining: false });
   if (r.remaining === 0) {
     await run(db, "UPDATE marksheet_runs SET finished_at = datetime('now') WHERE id = ?", runRow.id);
     const done = await first(db, "SELECT * FROM marksheet_runs WHERE id = ?", runRow.id);

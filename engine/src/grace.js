@@ -3,14 +3,21 @@ import { isNum, roundSheets } from "./math.js";
 import { seriatimOrder } from "./course.js";
 
 // Grace marks. A student gets a pool of 1% of the total ESE maximum of the semester's papers, spent in seriatim on failed
-// Theory papers within 3 points of a pass mark. A paper takes one kind of grace, and only if it then passes:
+// Theory papers less than 4 points below a pass mark: the Gracing Policy's "> 36% and < 40%" at a pass mark of 40.
+// A paper takes one kind of grace, and only if it then passes:
 //   ESE grace   ESE is raised to its pass mark; costs the ESE shortfall.
-//   COMB grace  ESE is raised just enough for COMB to reach its pass mark, CIE untouched; costs the COMB shortfall. Only
-//               where the ESE passes or is itself within 3 of its pass mark.
-// Shortfalls are in percentage points and cost that share of the paper's ESE maximum, in actual marks: 2 points on a
-// paper out of 50 cost 1 mark.
+//   COMB grace  ESE is raised, a whole mark at a time, to the lowest mark at which the paper passes (COMB rounded as the
+//               sheets do), CIE untouched; costs the COMB shortfall. Only
+//               where the ESE passes or is itself in that range.
+// The range and the shortfall use the exact percentages of the marks (35 out of 75 is 46.67%, not the 47% the marks
+// sheets show), to two decimals; whether a paper passes still goes by the sheets' rounded percentages. A shortfall is
+// in percentage points and costs that share of the paper's ESE maximum, in actual marks: 3.33 points on an ESE out of 75
+// cost 2.5 marks. Grace is then given in whole marks, rounded up so the pass mark is still reached: 2.5 becomes 3, and
+// ESE grace raises the ESE by that many marks (35 to 38 out of 75, 50.67%). The pool itself keeps its decimals (3.25).
 
-const WINDOW = 3;
+const BELOW = 4;   // "> 36%" at a pass mark of 40
+// Whole marks, rounded up; the exact cost is worked out to two decimals first, so 2.00 stays 2.
+const wholeMarks = x => Math.ceil(marksOf(x) - 1e-9);
 const marksOf = x => roundSheets(x, 2);
 const effective = p => (p.overrides ? { ...p.course, ...p.overrides } : p.course);
 
@@ -31,7 +38,17 @@ export function passMarks(course, reference) {
   return { ese, comb: table === null ? (category || null) : Math.max(table, category) };
 }
 
-const inWindow = (value, pass) => isNum(value) && isNum(pass) && value < pass && value >= pass - WINDOW;
+const inWindow = (value, pass) => isNum(value) && isNum(pass) && value < pass && value > pass - BELOW;
+
+// The exact percentages of a paper's marks, to two decimals: CIE, ESE, and COMB from them with the paper's weights.
+function exactPcts(p, c, reference) {
+  const of = (marks, max) => (isNum(marks) && isNum(max) && max > 0 ? (marks / max) * 100 : null);
+  const cie = of(p.cieRaw, c.cieMax), ese = of(p.eseRaw, c.eseMax);
+  const weights = isNum(c.cieWeight) && isNum(c.eseWeight) ? { cie: c.cieWeight, ese: c.eseWeight } : reference.weightage?.[String(c.weightageCategory)] ?? null;
+  const comb = c.calcType === CALC_TYPE.ESE_ONLY ? ese
+    : c.calcType === CALC_TYPE.CIE_AND_ESE && weights && isNum(ese) ? (cie ?? 0) * weights.cie + ese * weights.ese : null;
+  return { ese: isNum(ese) ? marksOf(ese) : null, comb: isNum(comb) ? marksOf(comb) : null };
+}
 
 const seriatim = (a, b) => seriatimOrder({ sequence: a.course?.sequence, code: a.paperCode }, { sequence: b.course?.sequence, code: b.paperCode });
 
@@ -58,16 +75,16 @@ export function supplementaryGrace({ basePapers, postgraduate, attempt }) {
   return { pool, usedBefore: terminal ? 0 : usedBefore, available: terminal ? pool : Math.max(0, marksOf(pool - usedBefore)), attempt, terminal };
 }
 
-function raiseEseForComb(p, course, comb, recompute) {
-  const r = p.result;
-  const weight = isNum(course.eseWeight) ? course.eseWeight : null;
-  if (!weight) return null;
-  const shortfall = comb - r.combPct;
-  const toMarks = pct => marksOf((pct * course.eseMax) / 100);
-  // The ESE the COMB arithmetic calls for (CIE 30, ESE 46: 2 short at 50/50, so ESE 50), raised further only if rounding leaves COMB short.
-  for (let pct = roundSheets(r.eseComptPct + shortfall / weight); pct <= 100; pct++) {
-    const trial = recompute(p, toMarks(pct));
-    if (isNum(trial.combPct) && trial.combPct >= comb) return { trial, eseToPct: pct, gracedMarks: toMarks(pct), shortfall };
+function raiseEseForComb(p, course, comb, exact, recompute) {
+  if (!isNum(course.eseMax) || course.eseMax <= 0) return null;
+  const shortfall = marksOf(comb - exact.comb);
+  // The lowest ESE, a whole mark at a time above the one obtained, at which the paper passes: COMB reaches its pass mark
+  // as the sheets round it, and the ESE passes too. CIE 52, ESE 42 at 50/50 is COMB 47; ESE 47 gives COMB 49.5, which
+  // the sheets round to 50, so the ESE becomes 47 (not the 48 that makes COMB exactly 50).
+  for (let k = 1; p.eseRaw + k <= course.eseMax; k++) {
+    const gracedMarks = marksOf(p.eseRaw + k);
+    const trial = recompute(p, gracedMarks);
+    if (trial.status === STATUS.PASS) return { trial, eseToPct: marksOf((gracedMarks / course.eseMax) * 100), gracedMarks, shortfall };
   }
   return null;
 }
@@ -85,28 +102,32 @@ export function applyGrace(papers, { available, reference, recompute }) {
     if (c.calcType === CALC_TYPE.CIE_AND_ESE && isNum(c.cieMax) && c.cieMax > 0 && !isNum(p.cieRaw)) continue;
 
     const pass = passMarks(c, reference);
-    const eseIn = inWindow(r.eseComptPct, pass.ese);
+    const exact = exactPcts(p, c, reference);
+    const eseIn = inWindow(exact.ese, pass.ese);
     // COMB grace only where the ESE itself passes or is within the range: an ESE further below its pass mark stays failed,
     // even when raising it would bring COMB up (CIE 40%, ESE 34: COMB 37, but the ESE is 6 short).
-    const eseWithin = !isNum(pass.ese) || (isNum(r.eseComptPct) && r.eseComptPct >= pass.ese - WINDOW);
-    const combIn = c.calcType === CALC_TYPE.CIE_AND_ESE && eseWithin && inWindow(r.combPct, pass.comb);
+    const eseWithin = !isNum(pass.ese) || (isNum(exact.ese) && exact.ese > pass.ese - BELOW);
+    const combIn = c.calcType === CALC_TYPE.CIE_AND_ESE && eseWithin && inWindow(exact.comb, pass.comb);
     if (!eseIn && !combIn) continue;
     if (!isTheory(c)) { if (typeBlank(c)) noType.push(p); continue; }
 
     const options = [];
     if (eseIn) {
-      const gracedMarks = marksOf((pass.ese * c.eseMax) / 100);
+      const exactMarks = marksOf((marksOf(pass.ese - exact.ese) * c.eseMax) / 100);
+      const marks = wholeMarks(exactMarks);
+      const gracedMarks = marksOf(p.eseRaw + marks);
       const trial = recompute(p, gracedMarks);
       if (trial.status === STATUS.PASS) {
-        options.push({ kind: "ESE", marks: marksOf(((pass.ese - r.eseComptPct) * c.eseMax) / 100), gracedMarks, trial,
-          fromPct: r.eseComptPct, toPct: pass.ese, eseFromPct: r.eseComptPct, eseToPct: pass.ese });
+        options.push({ kind: "ESE", marks, exactMarks, gracedMarks, trial,
+          fromPct: exact.ese, toPct: pass.ese, eseFromPct: exact.ese, eseToPct: marksOf((gracedMarks / c.eseMax) * 100), combFromPct: exact.comb });
       }
     }
     if (combIn) {
-      const raised = raiseEseForComb(p, c, pass.comb, recompute);
+      const raised = raiseEseForComb(p, c, pass.comb, exact, recompute);
       if (raised && raised.trial.status === STATUS.PASS) {
-        options.push({ kind: "COMB", marks: marksOf((raised.shortfall * c.eseMax) / 100), gracedMarks: raised.gracedMarks, trial: raised.trial,
-          fromPct: r.combPct, toPct: pass.comb, eseFromPct: r.eseComptPct, eseToPct: raised.eseToPct });
+        const exactMarks = marksOf((raised.shortfall * c.eseMax) / 100);
+        options.push({ kind: "COMB", marks: wholeMarks(exactMarks), exactMarks, gracedMarks: raised.gracedMarks, trial: raised.trial,
+          fromPct: exact.comb, toPct: pass.comb, eseFromPct: exact.ese, eseToPct: raised.eseToPct, combFromPct: exact.comb });
       }
     }
     if (!options.length) continue;

@@ -217,6 +217,8 @@ label { display: grid; gap: 4px; font-size: 0.82rem; color: var(--ink-soft); fon
 .btn.primary.small, .btn.primary.small:hover, .btn.approve.small { color: var(--on-accent); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cr-status-filter { padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+.cr-status-empty { padding: 16px; }
 .chip { font: inherit; font-size: 0.82rem; font-weight: 500; border: 1px solid var(--rule); background: var(--sheet); border-radius: var(--radius-ctl); padding: 3px 11px; cursor: pointer; color: var(--ink-soft);
   transition: background-color 0.12s, color 0.12s, border-color 0.12s; }
 .chip:hover { border-color: var(--ink-faint); color: var(--ink); }
@@ -633,6 +635,23 @@ details summary { cursor: pointer; }
 .reg-table td.reg-wtg { white-space: nowrap; }
 .reg-papers tr.reg-failed td.reg-comb, .reg-papers tr.reg-failed td.reg-remarks, .reg-table td.reg-not-gpa { color: var(--seal); font-weight: 600; }
 
+.reg-papers tr.reg-graced td.reg-remarks { color: var(--changed); font-weight: 600; }
+.reg-printed { margin-bottom: 18px; }
+.reg-printed > summary { cursor: pointer; padding: 12px 16px; list-style-position: inside; }
+.reg-printed-table td, .reg-printed-table th { white-space: nowrap; }
+.reg-not-printed { margin: 0 0 12px; }
+.reg-not-printed > summary { cursor: pointer; }
+.reg-not-printed ul { columns: 3 220px; margin: 8px 0 0; padding-left: 18px; }
+.reg-grace { display: grid; gap: 6px; }
+.reg-grace-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 0.82rem; }
+.reg-grace-head b { font-size: 0.86rem; }
+.reg-grace-head span { color: var(--ink-soft); }
+.reg-grace-table { min-width: 860px; font-size: 0.78rem; }
+.reg-grace-table th { white-space: normal; }
+.reg-table td.reg-grace-marks { font-weight: 700; }
+.reg-grace-calc { display: grid; gap: 2px; white-space: nowrap; }
+.reg-grace-table tr.reg-failed td.reg-title, .reg-grace-table tr.reg-failed td.reg-remarks { color: var(--seal); font-weight: 600; }
+
 /* Grade register on paper: always black on white, whatever the theme on screen. */
 .print-root { display: none; --ink: #000; --rule: #555; --surface-2: #e6e9f0; --surface-sunk: #f4f5f8; --seal: #000; --sheet: #fff;
   color: #000; background: #fff; font-family: "Public Sans", Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -645,6 +664,7 @@ details summary { cursor: pointer; }
 .print-head-text b { font-family: "Spectral", Georgia, serif; font-size: 15pt; font-weight: 700; line-height: 1.2; }
 .print-head-text strong { margin-top: 0.8mm; font-size: 10.5pt; font-weight: 700; }
 .print-head-side { display: grid; gap: 0.5mm; justify-self: end; text-align: right; font-size: 7.5pt; color: #333; }
+.print-initials { font-size: 18pt; font-weight: 700; color: #000; letter-spacing: 0.04em; line-height: 1; }
 .print-root .reg-student { display: block; padding: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; background: none; }
 .print-root .scroll { overflow: visible; margin-bottom: 2.5mm; }
 .print-root .reg-table { min-width: 0; font-size: 7.6pt; line-height: 1.25; }
@@ -655,6 +675,10 @@ details summary { cursor: pointer; }
 /* Headings never split inside a word: Course Title, whose text can wrap, gives up the width instead. */
 .print-root .reg-papers th { white-space: normal; overflow-wrap: normal; padding-left: 0.6mm; padding-right: 0.6mm; }
 .print-root .reg-papers tr { break-inside: avoid; }
+.print-root .reg-grace { display: block; break-inside: avoid; }
+.print-root .reg-grace-head { font-size: 8pt; margin-bottom: 1mm; color: #000; }
+.print-root .reg-grace-head span { color: #000; }
+.print-root .reg-papers tr.reg-graced td.reg-remarks { color: #000; }
 .print-root a { color: inherit; text-decoration: none; }
 .stat-strip span::first-letter { text-transform: uppercase; }
 .brand b { color: #fff; }

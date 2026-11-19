@@ -4,7 +4,7 @@
 import { api, enc } from "../api.js";
 import { referenceTables, buildInputs, evaluate, baseResults, previousMap, buildSave, diffExceptions, diffBatches, RESULT_COLUMNS } from "../../shared/compute-core.js";
 import { analyticsFor } from "../../shared/analytics-core.js";
-import { buildReport, liveRows } from "../../shared/completeness-core.js";
+import { arrivalPart, buildReport, liveRows } from "../../shared/completeness-core.js";
 
 const RESULT_PAGE = 20;      // results saved per request (the server allows up to 20)
 const CARRY_PAGE = 500;      // unchanged results copied per request (the server allows up to 500)
@@ -51,16 +51,21 @@ export async function evaluateInBrowser(sid, { onProgress } = {}) {
 
 // Completeness as the latest Compute left it, built here from the stored rows (downloaded in pages, several at once).
 // On Cloudflare's free plan the server cannot build it within a request's 10 ms of CPU.
+// Compute stores the parts that need every mark, student and course (arrival); a run from before that reads them all.
 export async function storedReportInBrowser(sid, { onProgress } = {}) {
   const base = `/sessions/${enc(sid)}`;
   onProgress?.({ stage: "load", label: "Reading the report", done: 0, total: null });
   const extras = await api.get(`${base}/completeness?part=extras`);
   if (!extras.runId) return { run: null, marksDirty: extras.marksDirty };
+  const run = encodeURIComponent(extras.runId);
   const paged = (path, label) => pages(after => api.get(`${path}${after ? `&after=${encodeURIComponent(after)}` : ""}`), n => onProgress?.({ stage: "load", label, done: n, total: null }));
-  const [exceptions, results, batchRows, students, marks, courses] = await Promise.all([
+  const [exceptions, batchRows, arrival] = await Promise.all([
     paged(`${base}/completeness?part=exceptions`, "Reading issues"),
-    paged(`${base}/completeness?part=results&runId=${encodeURIComponent(extras.runId)}`, "Reading results"),
-    api.get(`${base}/completeness?part=batches&runId=${encodeURIComponent(extras.runId)}`),
+    api.get(`${base}/completeness?part=batches&runId=${run}`),
+    api.get(`${base}/completeness?part=arrival&runId=${run}`)
+  ]);
+  const [results, students, marks, courses] = arrival ? [null, null, null, null] : await Promise.all([
+    paged(`${base}/completeness?part=results&runId=${run}`, "Reading results"),
     paged(`${base}/calc/inputs?part=students`, "Reading students"),
     paged(`${base}/calc/inputs?part=marks`, "Reading marks"),
     paged(`${base}/calc/inputs?part=courses`, "Reading courses")
@@ -70,7 +75,7 @@ export async function storedReportInBrowser(sid, { onProgress } = {}) {
   exceptions.sort((a, b) => cmp(a.batch_key, b.batch_key) || cmp(a.regd_no, b.regd_no) || cmp(a.paper_code, b.paper_code));
   return {
     run: { id: extras.runId, startedAt: extras.lastComputedAt }, marksDirty: extras.marksDirty,
-    ...buildReport({ exceptions, batches: batchRows.rows, results, students, marks, courses, overrides: extras.overrides, detentionRows: extras.detentionRows })
+    ...buildReport({ exceptions, batches: batchRows.rows, results, students, marks, courses, arrival, overrides: extras.overrides, detentionRows: extras.detentionRows })
   };
 }
 
@@ -89,7 +94,7 @@ export async function checkInBrowser(sid, { onProgress } = {}) {
 // The whole Compute. Returns what the old server Compute returned: { runId, unchanged, students, releasable, held, withheld, ... }.
 export async function computeInBrowser(sid, { onProgress } = {}) {
   const root = `/sessions/${enc(sid)}/calc`;
-  const { inputs, evaluated } = await evaluateInBrowser(sid, { onProgress });
+  const { inputs, evaluated, raw } = await evaluateInBrowser(sid, { onProgress });
   onProgress?.({ stage: "save", label: "Preparing the results", done: 0, total: null });
   const save = await buildSave(evaluated, inputs);
   const summary = { ...save.summary, fingerprint: save.fingerprint };
@@ -138,6 +143,11 @@ export async function computeInBrowser(sid, { onProgress } = {}) {
   const objectsOf = save.rows.map(r => Object.fromEntries(RESULT_COLUMNS.map((c, i) => [c, r[i]])));
   const { releasable, all, cycle } = analyticsFor(objectsOf);
   await api.postText(`${root}/analytics?runId=${encodeURIComponent(runId)}`, `{"analytics":${JSON.stringify({ releasable, all })},"cycle":${JSON.stringify(cycle)}}`);
+
+  // Completeness reads these from here instead of downloading every mark, student and course each time it opens.
+  onProgress?.({ stage: "save", label: "Saving the completeness report", done: 0, total: null });
+  const { rule1a, noFetch, names } = arrivalPart(raw);
+  await api.postText(`${root}/arrival?runId=${encodeURIComponent(runId)}`, JSON.stringify({ rule1a, noFetch, names }));
 
   onProgress?.({ stage: "save", label: "Finishing", done: 0, total: null });
   return { ...(await api.post(`${root}/finish`, { runId, unchanged, summary })), changedResults: unchanged ? 0 : changed };

@@ -17,9 +17,71 @@ const HEAD = ["Name", "Regd. No.", "Campus", "Programme", "Semester"];
 const COLUMNS = ["S.No.", "Course Code", "Course Title", "Type", "Category", "Credits", "Weightage (CIE/ESE)", "CIE Marks", "ESE Marks", "CIE%", "ESE%", "COMB%", "CIE-NP", "ESE-NP", "COMB-NP", "EarnedCred", "EarnedCrPoints", "Remarks"];
 const SUMMARY = ["Sum of EarnedCred", "Sum of EarnedCrPoints", "Semester GPA", "Letter Grade", "Qual Grade"];
 
+const GRACE_COLUMNS = ["S.No.", "Course Code", "Course Title", "Grace Type", "Calculation", "Grace Marks Used", "ESE Marks (before → after)", "ESE% (before → after)", "COMB% (before → after)", "COMB-NP", "Result"];
+const plural = (n, word) => `${whole(n)} ${word}${n === 1 ? "" : "s"}`;
+const fromTo = (a, b, f) => (a === null || a === undefined ? f(b) : `${f(a)} → ${f(b)}`);
+const outOf = (v, max) => (typeof max === "number" && max > 0 ? `${whole(v)}/${whole(max)}` : whole(v));
+
+// The grace pool in a sentence: 1% of the semester's total ESE maximum, and for a supplementary, what that attempt had to spend.
+function poolLine(g) {
+  const spent = `${plural(g.used ?? 0, "mark")} used, ${whole(g.left)} left`;
+  if (g.pool === null) return `${spent}.`;
+  if (!g.attempt) return `Grace pool ${plural(g.pool, "mark")} (1% of ${whole(g.pool * 100)}, the semester's total ESE maximum): ${spent}.`;
+  if (g.terminal) return `Terminal supplementary (attempt ${g.attempt}): a fresh grace pool of ${plural(g.pool, "mark")}: ${spent}.`;
+  return `Supplementary attempt ${g.attempt}: grace pool ${plural(g.pool, "mark")}, ${whole(g.usedBefore)} used in the regular exam, so ${whole(g.available)} available: ${spent}.`;
+}
+
+// How the grace marks were worked out: the points short of the pass mark, as that share of the ESE maximum in marks,
+// rounded up to whole marks. "ESE pass 50% − 46.67% = 3.33 points" / "3.33 × 75 ÷ 100 = 2.5, rounded up to 3 marks".
+function GraceSum({ p }) {
+  const what = p.kind === "COMB" ? "COMB" : "ESE";
+  return (
+    <span className="reg-grace-calc">
+      <span>{what} pass {oneDp(p.passPct)}% − {oneDp(p.shortPct)}% = {plural(p.points, "point")}</span>
+      <span>{whole(p.points)} × {whole(p.eseMax)} ÷ 100 = {p.exactMarks !== p.marks ? `${whole(p.exactMarks)}, rounded up to ${plural(p.marks, "mark")}` : plural(p.marks, "mark")}</span>
+    </span>
+  );
+}
+
+// Every graced paper with what was raised, from what to what and at what cost; then the papers the pool could not cover.
+function GracingBlock({ g }) {
+  return (
+    <div className="reg-grace">
+      <div className="reg-grace-head"><b>Gracing</b><span>{poolLine(g)}</span></div>
+      <div className="scroll">
+        <table className="reg-table reg-grace-table">
+          <thead><tr>{GRACE_COLUMNS.map(h => <th key={h}>{h}</th>)}</tr></thead>
+          <tbody>
+            {g.papers.map((p, i) => (
+              <tr key={p.courseCode}>
+                <td>{i + 1}</td><td className="reg-code">{p.courseCode}</td><td className="reg-title">{shown(p.title)}</td>
+                <td>{p.kind === "COMB" ? "COMB grace" : "ESE grace"}</td><td><GraceSum p={p} /></td><td className="reg-grace-marks">+{whole(p.marks)}</td>
+                <td>{fromTo(p.eseFrom, p.eseTo, v => outOf(v, p.eseMax))}</td>
+                <td>{fromTo(p.esePctFrom, p.esePctTo, oneDp)}</td>
+                <td>{fromTo(p.combPctFrom, p.combPctTo, oneDp)}</td>
+                <td>{oneDp(p.combNp)}</td><td>Passed with grace</td>
+              </tr>
+            ))}
+            {g.notGraced.map((p, i) => (
+              <tr key={p.courseCode} className="reg-failed">
+                <td>{g.papers.length + i + 1}</td><td className="reg-code">{p.courseCode}</td>
+                <td className="reg-title" colSpan={GRACE_COLUMNS.length - 3}>
+                  Not graced: needed {plural(p.needed, "grace mark")}, but {p.left ? `only ${whole(p.left)} ${p.left === 1 ? "was" : "were"} left in the pool` : "none was left in the pool"}.
+                </td>
+                <td className="reg-remarks">Failed</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const groupLabel = key => { const [programme, semester] = key.split("|"); return `${programme}, Sem ${semester}`; };
 
 const LOGO = "/Images/SSSIHL%20Logo_White.png";
+const PRINTED_BY = "SSJ";   // initials beside the print date on every printed page, as the results office asked
 const CONFIRM_ABOVE = 100;   // students: printing more than this asks first, since each student is a page
 
 function StudentBlock({ s, sid }) {
@@ -38,7 +100,7 @@ function StudentBlock({ s, sid }) {
         <table className="reg-table reg-papers">
           <thead><tr>{COLUMNS.map(h => <th key={h}>{h}</th>)}</tr></thead>
           <tbody>{s.rows.map(r => (
-            <tr key={r.courseCode} className={r.failed ? "reg-failed" : ""}>
+            <tr key={r.courseCode} className={[r.failed && "reg-failed", r.graced && "reg-graced"].filter(Boolean).join(" ")}>
               <td>{r.sno}</td><td className="reg-code">{r.courseCode}</td><td className="reg-title">{shown(r.title)}</td>
               <td>{shown(r.type)}</td><td>{r.category ?? ""}</td><td>{whole(r.credits)}</td><td className="reg-wtg">{shown(r.weightage)}</td>
               <td>{oneDp(r.cieMarks)}</td><td>{oneDp(r.eseMarks)}</td><td>{oneDp(r.ciePct)}</td><td>{oneDp(r.esePct)}</td><td>{oneDp(r.combPct)}</td>
@@ -58,6 +120,7 @@ function StudentBlock({ s, sid }) {
           </tr></tbody>
         </table>
       </div>
+      {s.gracing && <GracingBlock g={s.gracing} />}
     </section>
   );
 }
@@ -127,12 +190,65 @@ function PrintPage({ s, sid, job }) {
           <strong>Grade Register{job.title ? `: ${job.title}` : ""}</strong>
         </div>
         <div className="print-head-side">
-          <span>Printed {printed}</span>
+          <span>Printed {printed} · <b className="print-initials">{PRINTED_BY}</b></span>
           <span>Results computed {fmtWhen(job.computedAt)}</span>
         </div>
       </header>
       <StudentBlock s={s} sid={sid} />
     </article>
+  );
+}
+
+// The prints made from the portal (register/printed): loaded only when the panel is opened. Each print is recorded when
+// the print dialog opens; the browser does not say whether the person then printed or cancelled. Also lists the
+// programmes with ready results that have not been printed yet.
+function PrintHistory({ sid, groups, tick }) {
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState({ rows: null, error: null });
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    api.get(`/sessions/${enc(sid)}/register/printed`).then(rows => live && setState({ rows, error: null }), e => live && setState({ rows: null, error: e.message }));
+    return () => { live = false; };
+  }, [open, sid, tick]);
+  const rows = state.rows;
+  const ready = groups.filter(g => g.ready > 0);
+  const printedAll = rows?.some(r => !r.group && !r.q);
+  const printed = new Set(rows?.filter(r => r.group).map(r => r.group));
+  const notYet = rows ? (printedAll ? [] : ready.filter(g => !printed.has(g.key))) : [];
+  return (
+    <details className="sheet reg-printed" onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary><b>Printed from the portal</b><span className="small muted"> Each time the print dialog was opened here, with who, when and which students.</span></summary>
+      {state.error && <div className="notice red">{state.error}</div>}
+      {open && !rows && !state.error && <div className="pad small muted">Loading…</div>}
+      {rows && (
+        <div className="pad">
+          <p className="small">
+            <b>{rows.length}</b> print{rows.length === 1 ? "" : "s"} recorded, covering <b>{printedAll ? "every" : printed.size}</b> of {ready.length} programme{ready.length === 1 ? "" : "s"} with ready results.
+          </p>
+          {notYet.length > 0 && (
+            <details className="reg-not-printed">
+              <summary className="small"><b>Not printed yet: {notYet.length}</b></summary>
+              <ul className="small">{notYet.map(g => <li key={g.key}>{groupLabel(g.key)} <span className="muted">({g.ready} ready)</span></li>)}</ul>
+            </details>
+          )}
+          {rows.length > 0 && (
+            <div className="scroll">
+              <table className="ledger reg-printed-table">
+                <thead><tr><th>When</th><th>Programme and semester</th><th>Students</th><th>Search</th><th>Results computed</th><th>By</th></tr></thead>
+                <tbody>{rows.map(r => (
+                  <tr key={r.id}>
+                    <td>{fmtWhen(r.at)}</td><td>{r.group ? groupLabel(r.group) : r.label}</td>
+                    <td title={r.regdNos.slice(0, 60).join(", ") + (r.regdNos.length > 60 ? ", …" : "")}>{r.count.toLocaleString()}</td>
+                    <td>{r.q || ""}</td><td>{r.computedAt ? fmtWhen(r.computedAt) : ""}</td><td>{r.by}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -148,6 +264,7 @@ export default function GradeRegister() {
   const state = useLoad(`/sessions/${enc(sid)}/register?${params}`);
   const [printJob, setPrintJob] = useState(null);
   const [anim, setAnim] = useState(null);
+  const [printedTick, setPrintedTick] = useState(0);
   const endPrint = useRef(() => setPrintJob(null)).current;
   const print = async () => {
     const total = state.data.total;
@@ -156,6 +273,11 @@ export default function GradeRegister() {
     setAnim({ phase: "loading", pages: total });
     const job = await run(() => loadForPrint(sid, group, q));
     if (!job) { setAnim(null); return; }
+    // Recorded as the print dialog is about to open; a failure here never stops the print.
+    api.post(`/sessions/${enc(sid)}/register/printed`, {
+      group, label: group ? groupLabel(group) : "All programmes", q, count: job.students.length,
+      regdNos: job.students.map(s => s.regdNo), computedAt: job.computedAt
+    }).then(() => setPrintedTick(t => t + 1), () => {});
     const flip = flipPages(job.students);
     setAnim({ phase: "flipping", pages: job.students.length, flip });
     const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
@@ -200,6 +322,7 @@ export default function GradeRegister() {
               </div>
             </div>
           </div>
+          <PrintHistory sid={sid} groups={d.groups} tick={printedTick} />
           {d.notFound?.length > 0 && <div className="notice">No ready result{group ? " in this programme and semester" : ""} for {d.notFound.join(", ")}.</div>}
           {d.students.length === 0 && <div className="sheet"><EmptyState icon="search" title="No students match">{d.ready === 0 ? "No result is ready yet: clear the issues holding them back." : "Try another programme or search."}</EmptyState></div>}
           {d.students.map(s => <StudentBlock key={s.regdNo} s={s} sid={sid} />)}

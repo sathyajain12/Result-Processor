@@ -83,17 +83,29 @@ test("a paper out of 50 makes the pool 4.5 and its shortfall costs actual marks"
   assert.equal(g.r.grace.left, 3.5);
 });
 
-test("COMB grace: CIE 30, ESE 46 costs the COMB shortfall of 2 and ESE becomes 50", () => {
+test("COMB grace: CIE 30, ESE 46 costs the COMB shortfall of 2 and ESE becomes 49, the lowest that passes", () => {
+  // ESE 49 gives COMB 39.5, which the sheets round to 40.
   const courses = [theory("A-1", { cieMax: 100 }), theory("A-2")];
   const g = grade(courses, [["A-1", 30, 46], ["A-2", 40, 70]]);
   const p = g.paper("A-1");
   assert.equal(p.grace.kind, "COMB");
   assert.equal(p.grace.marks, 2);
+  assert.equal(p.grace.gracedMarks, 49);
   assert.equal(p.result.combPct, 40);
-  assert.equal(p.result.eseComptPct, 50);
+  assert.equal(p.result.eseComptPct, 49);
   assert.equal(p.result.ciePct, 30);
   assert.equal(p.result.status, "Pass");
   assert.equal(g.r.grace.left, 0);
+});
+
+test("PG COMB grace: CIE 52, ESE 42 is COMB 47; ESE 47 is the lowest that passes (COMB 49.5, rounded to 50)", () => {
+  const pg = { passCategory: 2 };
+  const g = grade([theory("M-1", { ...pg, cieMax: 100 }), theory("M-2", pg), theory("M-3", pg), theory("M-4", pg)],
+    [["M-1", 52, 42], ["M-2", 40, 70], ["M-3", 40, 70], ["M-4", 40, 70]], { programme: "MSC" });
+  const p = g.paper("M-1");
+  assert.deepEqual([p.grace.kind, p.grace.marks, p.grace.gracedMarks, p.grace.eseToPct], ["COMB", 3, 47, 47]);
+  assert.deepEqual([p.result.eseComptPct, p.result.combPct, p.result.status], [47, 50, "Pass"]);
+  assert.equal(g.r.grace.left, 1);
 });
 
 test("COMB grace with an unusual weightage still lands on the pass mark", () => {
@@ -156,7 +168,7 @@ test("COMB grace does not lift an ESE more than 3 below its pass mark", () => {
   assert.equal(ok.result.status, "Pass");
 });
 
-test("the range: 36% and 40% are not graced, 37% is", () => {
+test("the range is the policy's > 36% and < 40%: 36% and 40% are not graced, 36.5% and 37% are", () => {
   const go = ese => grade([theory("A-1"), theory("A-2"), theory("A-3"), theory("A-4"), theory("A-5")],
     [["A-1", 30, ese], ["A-2", 40, 70], ["A-3", 40, 70], ["A-4", 40, 70], ["A-5", 40, 70]]).paper("A-1");
   assert.equal(go(36).grace, undefined);
@@ -164,11 +176,40 @@ test("the range: 36% and 40% are not graced, 37% is", () => {
   assert.equal(go(40).grace, undefined);
   assert.equal(go(40).result.status, "Pass");
   assert.equal(go(37).grace.marks, 3);
+  assert.equal(go(36.5).grace.marks, 4);   // 3.5 short, rounded up to whole marks
 });
 
-test("rounding happens first: 36.5 converts to 37 and is graced", () => {
-  const g = grade([theory("A-1"), theory("A-2"), theory("A-3")], [["A-1", 30, 36.5], ["A-2", 40, 70], ["A-3", 40, 70]]);
-  assert.equal(g.paper("A-1").grace.marks, 3);
+test("exact percentages: 36.5 is 3.5 short, not the 3 its rounded 37 would be, and is graced 4 whole marks", () => {
+  const g = grade([theory("A-1"), theory("A-2"), theory("A-3"), theory("A-4")], [["A-1", 30, 36.5], ["A-2", 40, 70], ["A-3", 40, 70], ["A-4", 40, 70]]);
+  const p = g.paper("A-1");
+  assert.deepEqual([p.grace.exactMarks, p.grace.marks, p.grace.fromPct, p.grace.gracedMarks, p.result.status], [3.5, 4, 36.5, 40.5, "Pass"]);
+  assert.equal(g.r.grace.left, 0);
+  // With a pool of 3 it cannot be covered, though its rounded 37 would have cost exactly 3.
+  const short = grade([theory("A-1"), theory("A-2"), theory("A-3")], [["A-1", 30, 36.5], ["A-2", 40, 70], ["A-3", 40, 70]]);
+  assert.equal(short.paper("A-1").grace, undefined);
+  assert.match(short.codes(EXCEPTION.GRACE_NOT_AVAILABLE)[0].message, /needs 4 grace marks/);
+});
+
+test("COMB grace is also given in whole marks: a 1.5-mark COMB shortfall costs 2", () => {
+  // CIE 30/100 and ESE 34.5/75 (46%) at 50/50: COMB 38, 2 points short of 40, which is 1.5 marks of an ESE out of 75.
+  const g = grade([theory("A-1", { cieMax: 100, eseMax: 75 }), theory("A-2"), theory("A-3")], [["A-1", 30, 34.5], ["A-2", 40, 70], ["A-3", 40, 70]]);
+  const p = g.paper("A-1");
+  assert.deepEqual([p.grace.kind, p.grace.exactMarks, p.grace.marks, p.result.status], ["COMB", 1.5, 2, "Pass"]);
+  assert.equal(g.r.grace.left, 0.75);
+});
+
+test("M.Tech: ESE 35 out of 75 is 46.67%, inside the range at a pass mark of 50; 2.5 marks short, graced 3 whole marks", () => {
+  const mt = { passCategory: 3, cieNP: "I-B", eseNP: "I-B", combNP: "I-B" };
+  const g = grade([theory("T-1", { ...mt, cieMax: 25, eseMax: 75, cieWeight: 0.25, eseWeight: 0.75 }), theory("T-2", mt), theory("T-3", { ...mt, eseMax: 50 }), theory("T-4", mt)],
+    [["T-1", 25, 35], ["T-2", 40, 70], ["T-3", 40, 40], ["T-4", 40, 70]], { programme: "MTECH" });
+  assert.equal(g.r.grace.pool, 3.25);
+  const p = g.paper("T-1");
+  assert.deepEqual([p.grace.kind, p.grace.fromPct, p.grace.exactMarks, p.grace.marks, p.grace.gracedMarks, p.grace.eseToPct, p.grace.combFromPct], ["ESE", 46.67, 2.5, 3, 38, 50.67, 60]);
+  assert.deepEqual([p.result.eseComptPct, p.result.combPct, p.result.status], [51, 63, "Pass"]);
+  assert.equal(g.r.grace.left, 0.25);
+  // 34 out of 75 is 45.33%: below the range.
+  const below = grade([theory("T-1", { ...mt, cieMax: 25, eseMax: 75, cieWeight: 0.25, eseWeight: 0.75 }), theory("T-2", mt)], [["T-1", 25, 34], ["T-2", 40, 70]], { programme: "MTECH" });
+  assert.equal(below.paper("T-1").grace, undefined);
 });
 
 test("only Theory is graced; a Viva counts towards the pool", () => {

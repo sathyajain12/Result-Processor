@@ -4,6 +4,8 @@ import { api, enc } from "../api.js";
 import { useSession, useCan, Loading, Stage, StateStrip, StripLegend, EmptyState, useAction, fmtWhen, fmtGpa } from "../components/ui.jsx";
 import { Icon } from "../components/icons.jsx";
 import { compute, computedMessage } from "../lib/compute.js";
+import { MorningBanner } from "./MorningSummary.jsx";
+import { canSee } from "../../shared/tabs.js";
 
 const FILTERS = ["All", "Campus ready", "Blocked", "Collecting", "Under review", "Approved"];
 
@@ -105,6 +107,8 @@ function BoardBody({ s, filter, setFilter, me, busy, actions, sid }) {
           </div>
         )}
       </div>
+
+      {Object.keys(s.markSheets || {}).length > 0 && canSee(me, "marksheets") && <MorningBanner sid={sid} />}
 
       <div className="stat-strip">
         <div><b>{totals.students?.toLocaleString()}</b><span>students</span></div>

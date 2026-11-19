@@ -6,7 +6,8 @@ import { useSession, useLoad, Loading, useAction, fmtGpa, fmtWhen } from "../com
 const ACTIONS = {
   compute: "Recomputed results", sync: "Synced sheets", import: "Uploaded a file", approve: "Approved results", revoke: "Withdrew approval",
   publish: "Published results", override: "Added an override", "revoke-override": "Revoked an override", "configure-source": "Linked a sheet",
-  "create-session": "Created the session", "edit-programme": "Edited programme rules", "set-role": "Changed a role"
+  "create-session": "Created the session", "edit-programme": "Edited programme rules", "set-role": "Changed a role",
+  "print-register": "Printed the Grade register"
 };
 
 function describe(a) {
@@ -17,6 +18,7 @@ function describe(a) {
   if (a.action === "override") return `${a.entity}${d.regdNo ? ` for ${d.regdNo}` : ""}${d.paperCode ? ` ${d.paperCode}` : ""}: ${d.reason}`;
   if (a.action === "sync") return (d || []).map(s => `${s.kind} ${s.error ? "failed" : s.detail}`).join("; ");
   if (a.action === "import") return `${a.entity}: ${d.detail}${d.file ? ` from ${d.file}` : ""}`;
+  if (a.action === "print-register") return `${a.entity}: ${d.count} student${d.count === 1 ? "" : "s"}${d.q ? `, search "${d.q}"` : ""}`;
   return a.entity || "";
 }
 

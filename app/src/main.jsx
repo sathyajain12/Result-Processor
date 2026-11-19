@@ -24,6 +24,7 @@ import Failures from "./pages/Failures.jsx";
 import Grace from "./pages/Grace.jsx";
 import Completeness from "./pages/Completeness.jsx";
 import MarkSheets from "./pages/MarkSheets.jsx";
+import MorningSummary from "./pages/MorningSummary.jsx";
 import { canSee, allowedTabs } from "../shared/tabs.js";
 
 function Search({ sid }) {
@@ -195,6 +196,7 @@ function SessionShell({ me, sessions }) {
             <Route path="grace" element={only("grace", <Grace />)} />
             <Route path="completeness" element={only("completeness", <Completeness />)} />
             <Route path="marksheets" element={only("marksheets", <MarkSheets />)} />
+            <Route path="marksheets/morning" element={only("marksheets", <MorningSummary />)} />
             <Route path="register" element={only("register", <GradeRegister />)} />
             {/* An old or mistyped address (such as the removed Result sheet and Failure list) goes to the session's home page. */}
             <Route path="*" element={<Navigate to={`/s/${sid}`} replace />} />

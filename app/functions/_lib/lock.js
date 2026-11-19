@@ -8,6 +8,7 @@ export function isAllowedWhenLocked(method, pathname) {
   if (method === "GET" || method === "HEAD") return true;
   if (method === "PUT" && rest === "") return true;       // move between cycles
   if (method === "POST" && rest === "/lock") return true; // lock / unlock
+  if (method === "POST" && rest === "/register/printed") return true; // a record that the Grade register was printed
   return false;
 }
 

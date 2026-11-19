@@ -214,13 +214,7 @@ function Report({ d, sid, reload }) {
       </table>
     ) },
     { id: "eligible", n: "13", short: "Eligible batches", title: "Eligible batches — entering approval", kind: "good", empty: "No eligible batches yet", rows: r.eligible, render: rows => (
-      <table className="ledger small">
-        <thead><tr><th>Batch</th><th className="num">Students</th><th className="num">Ready</th><th className="num">Pending</th><th>Status</th></tr></thead>
-        <tbody>{rows.map(b => (
-          <tr key={b.batchKey}><td><Batch sid={sid} k={b.batchKey} id={b.batchId} /></td><td className="num">{b.students}</td><td className="num">{b.ready}</td><td className="num">{b.held || ""}</td>
-            <td>{b.status === "All checks passed" ? <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ All checks passed</span> : b.status}</td></tr>
-        ))}</tbody>
-      </table>
+      <EligibleTable sid={sid} rows={rows} status={params.get("status") || ""} setStatus={v => setParam("status", v)} />
     ) },
     { id: "detained", n: "14", short: "Detained students", title: "Detained students — processing with active batch CMF", kind: "detained", empty: "No detained students this cycle", rows: r.detained, render: rows => (
       <table className="ledger small">
@@ -275,6 +269,33 @@ function Report({ d, sid, reload }) {
           <Section key={`${current}|${batch}`} n={s.n} title={s.title} kind={s.kind} empty={s.empty} count={s.count}>{s.render(s.rows)}</Section>
         </div>
       </div>
+    </>
+  );
+}
+
+// Eligible batches, with a filter for the status: every batch, only those where all checks passed, or only those with
+// notes (a course not received yet, students pending, a campus still waiting…). The choice is kept in the address (?status=).
+const PASSED = "All checks passed";
+const STATUS_FILTERS = [["", "All"], ["passed", "✓ All checks passed"], ["notes", "With notes"]];
+function EligibleTable({ sid, rows, status, setStatus }) {
+  const count = { "": rows.length, passed: rows.filter(b => b.status === PASSED).length, notes: rows.filter(b => b.status !== PASSED).length };
+  const shown = status === "passed" ? rows.filter(b => b.status === PASSED) : status === "notes" ? rows.filter(b => b.status !== PASSED) : rows;
+  return (
+    <>
+      <div className="chips cr-status-filter" role="group" aria-label="Filter eligible batches by status">
+        {STATUS_FILTERS.map(([v, label]) => (
+          <button key={v} type="button" className={`chip ${status === v ? "on" : ""}`} aria-pressed={status === v} onClick={() => setStatus(v)}>{label} ({count[v]})</button>
+        ))}
+      </div>
+      {shown.length === 0 ? <p className="small muted cr-status-empty">{status === "passed" ? "No eligible batch has passed every check yet." : "Every eligible batch has passed every check."}</p> : (
+        <table className="ledger small">
+          <thead><tr><th>Batch</th><th className="num">Students</th><th className="num">Ready</th><th className="num">Pending</th><th>Status</th></tr></thead>
+          <tbody>{shown.map(b => (
+            <tr key={b.batchKey}><td><Batch sid={sid} k={b.batchKey} id={b.batchId} /></td><td className="num">{b.students}</td><td className="num">{b.ready}</td><td className="num">{b.held || ""}</td>
+              <td>{b.status === PASSED ? <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ All checks passed</span> : b.status}</td></tr>
+          ))}</tbody>
+        </table>
+      )}
     </>
   );
 }

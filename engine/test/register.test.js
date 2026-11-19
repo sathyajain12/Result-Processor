@@ -25,7 +25,7 @@ function entry(rows, courses = COURSES, ref = reference, overrides = []) {
     ese: rows.filter(r => r[2] !== null).map(([paperCode, , raw]) => ({ regdNo: "S1", paperCode, raw }))
   });
   const r = out.results[0];
-  return registerEntry({ student, result: r, papers: r.papers.map(compactPaper), courses: metaOf(courses), nonCredit: nonCreditCourses(student, "2025", courses), weightage: ref.weightage });
+  return registerEntry({ student, result: r, papers: r.papers.map(compactPaper), courses: metaOf(courses), nonCredit: nonCreditCourses(student, "2025", courses), weightage: ref.weightage, grace: r.grace });
 }
 
 const IMAGE = [["MAWR-300", 41, null], ["MTCS-302", 49, null], ["MTCS-301(noc26_cs144)", 22, 81]];
@@ -43,6 +43,18 @@ test("the register in the image: every column, in Sequence order, with the summa
   assert.deepEqual(project, { sno: 4, courseCode: "MTCS-401", title: "Project Work (Interim Review)", type: "--", category: null, credits: 0,
     weightage: null, cieMarks: null, eseMarks: null, ciePct: null, esePct: null, combPct: null, cieNp: null, eseNp: null, combNp: null, earnedCred: null, earnedPoints: null, failed: false, remarks: null });
   assert.deepEqual(e.summary, { sumEarnedCred: 7, sumEarnedPoints: 59, semesterGpa: 8.4, letterGrade: "O", qualGrade: "Distinction" });
+});
+
+test("a mark for a component the course does not have is not printed (MTOC-108: the viva entered in both sheets)", () => {
+  const viva = { ...base, code: "MTOC-108", title: "Semester End Viva voce", category: "NA", courseType: "--", sequence: "8", credits: 1, cieMax: 0, eseMax: 50, cieWeight: 0, eseWeight: 1, calcType: 4 };
+  const courses = [...COURSES, viva];
+  const e = entry([...IMAGE.filter(r => r[0] !== "MTCS-302"), ["MTCS-302", 49, 30], ["MTOC-108", 28, 28]], courses);
+  const row = code => e.rows.find(r => r.courseCode === code);
+  const v = row("MTOC-108");
+  assert.deepEqual([v.cieMarks, v.eseMarks, v.ciePct, v.esePct, v.combPct, v.combNp], [null, 28, null, 56, 56, 6]);
+  const lab = row("MTCS-302");   // CIE only: a stray ESE mark is not printed either
+  assert.deepEqual([lab.cieMarks, lab.eseMarks, lab.combPct], [49, null, 98]);
+  assert.equal(row("MTCS-301(noc26_cs144)").cieMarks, 22);   // a course with both keeps both
 });
 
 test("Weightage: the CIE/ESE split each paper was graded with", () => {
@@ -88,7 +100,38 @@ test("a graced paper shows the graced ESE marks and says so", () => {
   const courses = COURSES.map(c => (c.code === "MTCS-301(noc26_cs144)" ? { ...c, eseMax: 100, cieMax: 100, cieWeight: 0.5, eseWeight: 0.5 } : c));
   const e = entry([["MAWR-300", 41, null], ["MTCS-302", 49, null], ["MTCS-301(noc26_cs144)", 60, 49]], courses);
   const g = e.rows[0];
-  assert.deepEqual([g.eseMarks, g.esePct, g.earnedCred, g.remarks], [50, 50, 4, "Graced +1"]);
+  assert.deepEqual([g.eseMarks, g.esePct, g.earnedCred, g.remarks, g.graced], [50, 50, 4, "Graced +1 (ESE)", true]);
+});
+
+test("a graced student's register lists the grace: the paper, what was raised and the pool", () => {
+  const courses = COURSES.map(c => (c.code === "MTCS-301(noc26_cs144)" ? { ...c, eseMax: 100, cieMax: 100, cieWeight: 0.5, eseWeight: 0.5 } : c));
+  const e = entry([["MAWR-300", 41, null], ["MTCS-302", 49, null], ["MTCS-301(noc26_cs144)", 60, 49]], courses);
+  assert.deepEqual(e.gracing, {
+    pool: 1, available: 1, used: 1, left: 0, attempt: null, terminal: null, usedBefore: null,
+    papers: [{ courseCode: "MTCS-301(noc26_cs144)", title: "Elective-IV: Cyber Security and Privacy", kind: "ESE", marks: 1, exactMarks: 1, points: 1, passPct: 50, shortPct: 49, eseMax: 100,
+      eseFrom: 49, eseTo: 50, esePctFrom: 49, esePctTo: 50, combPctFrom: 54.5, combPctTo: 55, combNp: 6 }],
+    notGraced: []
+  });
+});
+
+test("a student with no grace has no gracing section", () => {
+  assert.equal(entry([["MAWR-300", 41, null], ["MTCS-302", 49, null], ["MTCS-301(noc26_cs144)", 22, 80]]).gracing, null);
+});
+
+test("a failed paper the pool could not cover says so", () => {
+  const courses = COURSES.map(c => (c.code === "MTCS-301(noc26_cs144)" ? { ...c, eseMax: 100, cieMax: 100, cieWeight: 0.5, eseWeight: 0.5 } : c));
+  const out = processSession({
+    reference: { ...reference, courses }, students: { S1: student }, policy: { ...POLICY.DEFAULT, expectFromCmf: false }, overrides: [],
+    cie: [["MAWR-300", 41], ["MTCS-302", 49], ["MTCS-301(noc26_cs144)", 60]].map(([paperCode, raw]) => ({ regdNo: "S1", paperCode, raw })),
+    ese: [{ regdNo: "S1", paperCode: "MTCS-301(noc26_cs144)", raw: 47 }]
+  });
+  const r = out.results[0];
+  const refused = out.exceptions.filter(x => x.code === "GRACE_NOT_AVAILABLE").map(x => ({ paperCode: x.paperCode, needed: x.details.needed, left: x.details.left }));
+  assert.equal(refused.length, 1);
+  const e = registerEntry({ student, result: r, papers: r.papers.map(compactPaper), courses: metaOf(courses), weightage: {}, grace: r.grace, refused });
+  assert.equal(e.rows.find(x => x.courseCode === "MTCS-301(noc26_cs144)").remarks, "Not graced: pool short, Failed");
+  assert.deepEqual(e.gracing.notGraced, [{ courseCode: "MTCS-301(noc26_cs144)", needed: 3, left: 1 }]);
+  assert.deepEqual(e.gracing.papers, []);
 });
 
 test("a paper that has marks is not listed again as a non-credit row", () => {

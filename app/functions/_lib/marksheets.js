@@ -292,7 +292,24 @@ async function rowStatements(db, sessionId, sheet, result) {
       .bind(sessionId, sheet.component, sheet.key, m.regdNo, result.paperCode, sheet.campus ?? null, m.raw ?? null, m.percent ?? null, m.points ?? null,
         m.programme ?? null, m.semester ?? null, m.rowNo ?? null));
   }
+  // The marks tabs' totals and filter lists come from marksheet_row_groups, so recount this sheet's rows there after a change.
+  if (stmts.length) {
+    const sheetArgs = [sessionId, sheet.component, sheet.key];
+    stmts.push(db.prepare("DELETE FROM marksheet_row_groups WHERE session_id = ? AND component = ? AND sheet_key = ?").bind(...sheetArgs));
+    stmts.push(db.prepare(`INSERT INTO marksheet_row_groups (session_id, component, sheet_key, course_code, campus, programme, n)
+      SELECT session_id, component, sheet_key, course_code, campus, programme, COUNT(*) FROM marksheet_rows
+      WHERE session_id = ? AND component = ? AND sheet_key = ? GROUP BY course_code, campus, programme`).bind(...sheetArgs));
+  }
   return stmts;
+}
+
+// For the morning summary: a row when the sheet's status or marks changed in this run, else nothing.
+function eventStatement(db, sessionId, sheet, runId, status, counts, error) {
+  const { added = 0, changed = 0, removed = 0 } = counts || {};
+  if (!runId || (status === sheet.status && !added && !changed && !removed)) return null;
+  return db.prepare(`INSERT INTO marksheet_events (session_id, run_id, sheet_key, component, campus, course_code, from_status, to_status, added, changed, removed, error)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(sessionId, Number(runId), sheet.key, sheet.component, sheet.campus ?? null, sheet.course_code ?? null,
+    sheet.status ?? null, status, added, changed, removed, error ?? null);
 }
 
 // Check one Mark sheet and store its marks when they are ready.
@@ -306,7 +323,10 @@ export async function checkSheet(env, sessionId, sheet, runTag) {
       return { status: sheet.status, error: err.message, changes: 0, fetched: false, retryLater: true };
     }
     const status = err instanceof SheetAccessError && (err.status === 403 || err.status === 404) ? "no_access" : "error";
-    await run(db, "UPDATE marksheets SET status = ?, last_error = ?, last_checked_at = datetime('now') WHERE session_id = ? AND key = ?", status, err.message, sessionId, sheet.key);
+    const stmts = [db.prepare("UPDATE marksheets SET status = ?, last_error = ?, last_checked_at = datetime('now') WHERE session_id = ? AND key = ?").bind(status, err.message, sessionId, sheet.key)];
+    const event = eventStatement(db, sessionId, sheet, runTag, status, null, err.message);
+    if (event) stmts.push(event);
+    await batchInsert(db, stmts);
     return { status, error: err.message, changes: 0, fetched: false };
   }
   let applied = null;
@@ -327,6 +347,8 @@ export async function checkSheet(env, sessionId, sheet, runTag) {
       applied ? applied.keys.length : null, applied ? JSON.stringify(applied.keys) : null, applied ? applied.changed + applied.removed : null,
       sessionId, sheet.key));
   if (changes) stmts.push(db.prepare("UPDATE exam_sessions SET marks_dirty = 1 WHERE id = ?").bind(sessionId));
+  const event = eventStatement(db, sessionId, sheet, runTag, status, applied, result.error);
+  if (event) stmts.push(event);
   await batchInsert(db, stmts, 1000);
   return { status, changes, corrections: applied ? applied.changed + applied.removed : 0, fetched: !!applied };
 }

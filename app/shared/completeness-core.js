@@ -33,17 +33,12 @@ export function liveRows(out, batchIds) {
 
 // Rows: exceptions, batches, results (regd_no, batch_key, state, releasable), students, marks (regd_no, component, raw),
 // courses (programmes, semester, batches, calc_type, cie_max, ese_max), overrides and detention reasons, as stored.
-export function buildReport({ exceptions, batches, results, students, marks, courses, overrides, detentionRows }) {
-  const detentionReason = new Map(detentionRows.map(d => [d.regd_no, { reason: d.reason, by: d.updated_by, at: d.updated_at }]));
+// The parts of the report that need every mark, student and course: Rule 1A, "No fetch data" and the students' names.
+// They change only with the inputs, so Compute works them out once and stores them with the run (runs.arrival); opening
+// the report then reads that one row instead of about 17,000 rows of marks, students and courses.
+export function arrivalPart({ students, marks, courses }) {
   const name = new Map(students.map(s => [s.regd_no, s.name]));
-  const batchId = new Map(batches.map(b => [b.key, b.id]));
   const keyOf = s => `${s.programme}|${s.semester}|${s.batch ?? ""}`;
-  const ex = e => ({
-    code: e.code, severity: e.severity, batchKey: e.batch_key, batchId: batchId.get(e.batch_key) ?? null, regdNo: e.regd_no,
-    name: e.regd_no ? name.get(e.regd_no) ?? null : null, paperCode: e.paper_code, courseCode: e.course_code,
-    message: e.message, details: parseJson(e.details, {}), accepted: !!e.accepted
-  });
-  const pick = (...codes) => exceptions.filter(e => codes.includes(e.code)).map(ex);
 
   // ── Rule 1A / No fetch data: who appears in the CIE and ESE files at all ──
   const left = new Set(marks.filter(m => String(m.raw ?? "").trim().toUpperCase() === "L").map(m => m.regd_no));
@@ -78,25 +73,46 @@ export function buildReport({ exceptions, batches, results, students, marks, cou
   for (const [k, regds] of [...byBatch].sort(([a], [b]) => a.localeCompare(b))) {
     const missingCie = regds.filter(r => !inCie.has(r)), missingEse = regds.filter(r => !inEse.has(r));
     if (missingCie.length || missingEse.length) {
-      rule1a.push({ batchKey: k, batchId: batchId.get(k) ?? null, smf: regds.length,
-        cie: regds.length - missingCie.length, ese: regds.length - missingEse.length,
+      rule1a.push({ batchKey: k, smf: regds.length, cie: regds.length - missingCie.length, ese: regds.length - missingEse.length,
         missingCie: missingCie.map(r => ({ regdNo: r, name: name.get(r) })), missingEse: missingEse.map(r => ({ regdNo: r, name: name.get(r) })) });
     }
     const n = needsOf(k);
     if (!n) continue;
     const noCie = n.cie && !regds.some(r => cieWithMark.has(r)), noEse = n.ese && !regds.some(r => eseWithMark.has(r));
-    if (noCie || noEse) noFetch.push({ batchKey: k, batchId: batchId.get(k) ?? null, missing: [noCie && "CIE", noEse && "ESE"].filter(Boolean) });
+    if (noCie || noEse) noFetch.push({ batchKey: k, missing: [noCie && "CIE", noEse && "ESE"].filter(Boolean) });
   }
+  return { rule1a, noFetch, names: Object.fromEntries(name) };
+}
+
+// The report. `arrival` is the stored arrivalPart of the run; without it (a run computed before it was stored, or "Check
+// now") it is worked out from students, marks and courses. Pending counts come from `results` when given, else from the
+// batch stats the same Compute stored.
+export function buildReport({ exceptions, batches, results = null, students, marks, courses, overrides, detentionRows, arrival = null }) {
+  const detentionReason = new Map(detentionRows.map(d => [d.regd_no, { reason: d.reason, by: d.updated_by, at: d.updated_at }]));
+  const part = arrival ?? arrivalPart({ students, marks, courses });
+  const name = new Map(Object.entries(part.names));
+  const batchId = new Map(batches.map(b => [b.key, b.id]));
+  const ex = e => ({
+    code: e.code, severity: e.severity, batchKey: e.batch_key, batchId: batchId.get(e.batch_key) ?? null, regdNo: e.regd_no,
+    name: e.regd_no ? name.get(e.regd_no) ?? null : null, paperCode: e.paper_code, courseCode: e.course_code,
+    message: e.message, details: parseJson(e.details, {}), accepted: !!e.accepted
+  });
+  const pick = (...codes) => exceptions.filter(e => codes.includes(e.code)).map(ex);
+  const rule1a = part.rule1a.map(r => ({ ...r, batchId: batchId.get(r.batchKey) ?? null }));
+  const noFetch = part.noFetch.map(r => ({ ...r, batchId: batchId.get(r.batchKey) ?? null }));
 
   // ── Batch outcome: blocked batches cannot release anything; the rest are eligible ──
-  const held = new Map();
-  for (const r of results) if (!r.releasable && r.state !== "Withheld") held.set(r.batch_key, (held.get(r.batch_key) || 0) + 1);
+  let held = null;
+  if (results) {
+    held = new Map();
+    for (const r of results) if (!r.releasable && r.state !== "Withheld") held.set(r.batch_key, (held.get(r.batch_key) || 0) + 1);
+  }
   const blocked = [], eligible = [];
   for (const b of batches) {
     const stats = parseJson(b.stats, {});
     const batchBlocks = exceptions.filter(e => e.batch_key === b.key && !e.regd_no && e.severity === "block" && !e.accepted);
     const row = { batchKey: b.key, batchId: b.id, programme: b.programme, semester: b.semester, batch: b.batch, students: stats.students ?? 0,
-      ready: stats.ready ?? 0, held: held.get(b.key) || 0, withheld: stats.withheld ?? 0 };
+      ready: stats.ready ?? 0, held: (held ? held.get(b.key) : stats.held) || 0, withheld: stats.withheld ?? 0 };
     // A course not received holds only the students not confirmed complete (see finalizeSession), so a batch where some can
     // go ahead (often a whole campus) is eligible, with the course named; it is blocked only when it holds everyone.
     const wholeBatch = stats.blocked ?? batchBlocks.length > 0;

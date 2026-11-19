@@ -17,22 +17,45 @@ export async function onRequestGet({ env, params, request }) {
   const component = q.component === "ESE" ? "ESE" : q.component === "CIE" ? "CIE" : null;
   if (!component) throw new HttpError(400, "component must be CIE or ESE");
 
+  const sid = params.sid;
   const where = ["r.session_id = ?", "r.component = ?"];
-  const args = [params.sid, component];
+  const args = [sid, component];
   if (q.course) { where.push("r.course_code = ?"); args.push(q.course); }
   if (q.campus) { where.push("r.campus = ?"); args.push(q.campus); }
   if (q.programme) { where.push("r.programme = ?"); args.push(q.programme); }
-  if (q.q?.trim()) { where.push("(r.regd_no LIKE ? OR r.course_code LIKE ?)"); args.push(`%${q.q.trim()}%`, `%${q.q.trim()}%`); }
-  if (q.edited === "1") where.push("o.value IS NOT NULL");
+  const term = q.q?.trim() || "";
+  const edited = q.edited === "1";
+  if (edited) where.push("o.value IS NOT NULL");
 
-  // Latest active mark edit per student, paper and component.
-  const from = `FROM marksheet_rows r
-    LEFT JOIN (SELECT regd_no, paper_code, field, value, reason, MAX(id) AS id FROM overrides
-               WHERE session_id = ? AND type = 'mark' AND revoked_at IS NULL GROUP BY regd_no, paper_code, field) o
-      ON o.regd_no = r.regd_no AND o.paper_code = r.course_code AND o.field = r.component
+  // D1 charges for every row a query looks at, so each filter starts from the few rows it can match rather than
+  // walking all of a component's rows (about 10,000) and testing each one:
+  //   a search    the Regd Nos and course codes that begin with what was typed, found through their indexes
+  //               (marksheet_rows_regd, marksheet_rows_list). A search used to match anywhere in them ('%…%'),
+  //               which no index can serve.
+  //   with edits  the active mark edits first (a handful), then their rows.
+  // The latest active mark edit per student, paper and component:
+  const OVERRIDES = `(SELECT regd_no, paper_code, field, value, reason, MAX(id) AS id FROM overrides
+    WHERE session_id = ? AND type = 'mark' AND revoked_at IS NULL GROUP BY regd_no, paper_code, field)`;
+  const editOf = "o.regd_no = r.regd_no AND o.paper_code = r.course_code AND o.field = r.component";
+  let source, sourceArgs;
+  if (term) {
+    const up = term.toUpperCase();
+    const ranges = [["regd_no", term], ["course_code", up], ...(up !== term ? [["course_code", term]] : [])];   // noc26_… codes are lower case
+    source = `(${ranges.map(([col]) => `SELECT rowid AS id FROM marksheet_rows WHERE session_id = ? AND component = ? AND ${col} >= ? AND ${col} < ?`).join(" UNION ")}) m
+      CROSS JOIN marksheet_rows r ON r.rowid = m.id
+      LEFT JOIN ${OVERRIDES} o ON ${editOf}`;
+    sourceArgs = [...ranges.flatMap(([, v]) => [sid, component, v, `${v}￿`]), sid];
+  } else if (edited) {
+    source = `${OVERRIDES} o CROSS JOIN marksheet_rows r ON r.session_id = ? AND r.component = o.field AND r.course_code = o.paper_code AND r.regd_no = o.regd_no`;
+    sourceArgs = [sid, sid];
+  } else {
+    source = `marksheet_rows r LEFT JOIN ${OVERRIDES} o ON ${editOf}`;
+    sourceArgs = [sid];
+  }
+  const from = `FROM ${source}
     LEFT JOIN marksheets ms ON ms.session_id = r.session_id AND ms.key = r.sheet_key
     WHERE ${where.join(" AND ")}`;
-  const fromArgs = [params.sid, ...args];
+  const fromArgs = [...sourceArgs, ...args];
   const order = "ORDER BY r.programme, r.semester, r.course_code, r.campus, r.row_no, r.regd_no";
   const select = "SELECT r.regd_no, r.campus, r.course_code, r.marks, r.percent, r.num_points, r.programme, r.semester, o.value AS edited, o.reason, ms.max_marks";
 
@@ -56,18 +79,24 @@ export async function onRequestGet({ env, params, request }) {
     return csv([COLUMNS[component], ...rows.map(line)], `${params.sid}-${component}-marks.csv`);
   }
 
-  // Each of these reads the whole of this component's rows, so a page change (lite=1) skips them: the browser keeps the
-  // total and the filter lists from page 1. The filter lists come from one read of the distinct combinations.
+  // Totals and filter lists come from marksheet_row_groups (a count per sheet, course, campus and programme, about 1,300
+  // rows), not from counting the 14,500 rows of marks. Only a search or the "with remarks" filter needs a real count.
+  // A page change (lite=1) skips both: the browser keeps page 1's total and lists.
   const page = Math.max(1, Number(q.page) || 1);
   const lite = q.lite === "1";
-  const [rows, count, combos] = await Promise.all([
+  const exactCount = !lite && (term || edited);
+  const [rows, count, groups] = await Promise.all([
     all(db, `${select} ${from} ${order} LIMIT ? OFFSET ?`, ...fromArgs, PAGE, (page - 1) * PAGE),
-    lite ? null : first(db, `SELECT COUNT(*) AS n ${from}`, ...fromArgs),
-    lite ? null : all(db, "SELECT DISTINCT course_code, campus, programme FROM marksheet_rows WHERE session_id = ? AND component = ?", params.sid, component)
+    exactCount ? first(db, `SELECT COUNT(*) AS n ${from}`, ...fromArgs) : null,
+    lite ? null : all(db, `SELECT course_code, campus, programme, SUM(n) AS n FROM marksheet_row_groups WHERE session_id = ? AND component = ?
+      GROUP BY course_code, campus, programme`, sid, component)
   ]);
-  const list = key => [...new Set(combos.map(r => r[key]).filter(v => v !== null && v !== ""))].sort();
+  const list = key => [...new Set(groups.map(r => r[key]).filter(v => v !== null && v !== ""))].sort();
+  const total = lite ? null : exactCount ? count.n
+    : groups.filter(g => (!q.course || g.course_code === q.course) && (!q.campus || g.campus === q.campus) && (!q.programme || g.programme === q.programme))
+      .reduce((n, g) => n + g.n, 0);
   return json({
-    component, columns: COLUMNS[component], page, pageSize: PAGE, total: lite ? null : count.n,
+    component, columns: COLUMNS[component], page, pageSize: PAGE, total,
     rows: rows.map(shape),
     options: lite ? null : { courses: list("course_code"), campuses: list("campus"), programmes: list("programme") }
   });
